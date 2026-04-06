@@ -24,6 +24,7 @@ class music_cog(commands.Cog):
         self.YDL_OPTIONS = {
             'format': 'bestaudio/best',
             'js_runtimes': {'node': {}},
+            'extractor_args': {'youtube': {'player_client': ['android']}},
         }
         self.FFMPEG_OPTIONS = {'options': '-vn'}
         requested_binary = os.getenv("FFMPEG_PATH", "ffmpeg")
@@ -59,7 +60,7 @@ class music_cog(commands.Cog):
             loop = asyncio.get_event_loop()
             data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(m_url, download=False))
             song = data['url']
-            self.vc.play(discord.FFmpegPCMAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS), after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop))
+            self.vc.play(discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS), after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop))
         else:
             self.is_playing = False
 
@@ -87,7 +88,7 @@ class music_cog(commands.Cog):
             loop = asyncio.get_event_loop()
             data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(m_url, download=False))
             song = data['url']
-            self.vc.play(discord.FFmpegPCMAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS), after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop))
+            self.vc.play(discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS), after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop))
 
         else:
             self.is_playing = False
