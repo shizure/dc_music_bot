@@ -1,6 +1,7 @@
 import discord
 from discord.ext import commands
 import os, asyncio
+import shutil
 
 #import all of the cogs
 from help_cog import help_cog
@@ -32,6 +33,12 @@ async def main():
         token = os.getenv('TOKEN') or os.getenv('DISCORD_TOKEN')
         if not token:
             raise RuntimeError("Set TOKEN (or DISCORD_TOKEN) before starting the bot.")
+        ffmpeg_binary = os.getenv('FFMPEG_PATH', 'ffmpeg')
+        ffmpeg_path = shutil.which(ffmpeg_binary)
+        if ffmpeg_path:
+            print(f"FFmpeg detected at: {ffmpeg_path}")
+        else:
+            print(f"FFmpeg not found for binary: {ffmpeg_binary}")
         print("Starting Discord bot connection...")
         await bot.start(token)
 
