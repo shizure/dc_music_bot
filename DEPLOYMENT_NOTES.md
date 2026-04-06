@@ -1,0 +1,26 @@
+# Deployment Notes
+
+## Important limitation with Vercel and Discord bots
+
+Vercel runs Python as serverless functions. Discord bots need a long-lived websocket connection,
+which cannot stay alive in a serverless request/response lifecycle.
+
+This means:
+- The dashboard UI can be deployed on Vercel.
+- The Discord bot process itself should run on a persistent host (Railway, Render, Fly.io, VPS).
+
+## Recommended architecture
+
+1. Deploy this dashboard where your bot process runs, OR
+2. Keep dashboard on Vercel and point it to an API on your persistent bot host.
+
+This repository's control panel entrypoint is `control_panel.py` and Vercel routes through `api/index.py`.
+
+## Local run
+
+```bash
+set TOKEN=your_discord_bot_token
+python control_panel.py
+```
+
+Open http://localhost:5000
