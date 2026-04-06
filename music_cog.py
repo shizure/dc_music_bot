@@ -23,7 +23,7 @@ class music_cog(commands.Cog):
         self.music_queue = []
         self.YDL_OPTIONS = {
             'format': 'bestaudio/best',
-            'js_runtimes': 'node',
+            'js_runtimes': {'node': {}},
         }
         self.FFMPEG_OPTIONS = {'options': '-vn'}
         requested_binary = os.getenv("FFMPEG_PATH", "ffmpeg")
@@ -33,7 +33,11 @@ class music_cog(commands.Cog):
             self.ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
 
         self.vc = None
-        self.ytdl = YoutubeDL(self.YDL_OPTIONS)
+        try:
+            self.ytdl = YoutubeDL(self.YDL_OPTIONS)
+        except ValueError:
+            # Keep startup resilient if yt-dlp changes option schema.
+            self.ytdl = YoutubeDL({'format': 'bestaudio/best'})
 
      #searching the item on youtube
     def search_yt(self, item):
