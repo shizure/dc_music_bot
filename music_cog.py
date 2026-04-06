@@ -24,13 +24,7 @@ class music_cog(commands.Cog):
         # 2d array containing [song, channel]
         self.music_queue = []
         self._cookie_file_path = self._write_cookie_file_from_env()
-        self.YDL_OPTIONS = {
-            'format': 'bestaudio/best',
-            'js_runtimes': {'node': {}},
-            'noplaylist': True,
-        }
-        if self._cookie_file_path:
-            self.YDL_OPTIONS['cookiefile'] = self._cookie_file_path
+        self.YDL_OPTIONS = self._build_ydl_options(format_selector='bestaudio/best')
         self.FFMPEG_OPTIONS = {
             'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
             'options': '-vn -loglevel warning',
@@ -47,6 +41,21 @@ class music_cog(commands.Cog):
         except ValueError:
             # Keep startup resilient if yt-dlp changes option schema.
             self.ytdl = YoutubeDL({'format': 'bestaudio/best'})
+
+    def _build_ydl_options(self, format_selector: str | None, extract_flat: bool = False) -> dict:
+        options = {
+            'noplaylist': True,
+            'js_runtimes': {'node': {}},
+        }
+        if format_selector:
+            options['format'] = format_selector
+        if extract_flat:
+            options['extract_flat'] = 'in_playlist'
+            options['skip_download'] = True
+            options['quiet'] = True
+        if self._cookie_file_path:
+            options['cookiefile'] = self._cookie_file_path
+        return options
 
     def _write_cookie_file_from_env(self) -> str | None:
         cookie_path = os.getenv("YTDLP_COOKIE_FILE")
@@ -72,19 +81,31 @@ class music_cog(commands.Cog):
             return None
 
     def _search_with_ytdlp(self, query: str) -> dict:
-        info = self.ytdl.extract_info(f"ytsearch1:{query}", download=False)
+        search_ydl = YoutubeDL(self._build_ydl_options(format_selector=None, extract_flat=True))
+        info = search_ydl.extract_info(f"ytsearch1:{query}", download=False)
         entries = info.get("entries") or []
         if not entries:
             raise RuntimeError("No search results returned by yt-dlp")
         first = entries[0]
         url = first.get("webpage_url") or first.get("url")
+        if url and url.startswith("/watch"):
+            url = f"https://www.youtube.com{url}"
+        if not url and first.get("id"):
+            url = f"https://www.youtube.com/watch?v={first['id']}"
         title = first.get("title") or "Search result"
         if not url:
             raise RuntimeError("Search result did not include a URL")
         return {'source': url, 'title': title}
 
     def _extract_audio_stream_url(self, source_url: str) -> str:
-        info = self.ytdl.extract_info(source_url, download=False)
+        try:
+            info = self.ytdl.extract_info(source_url, download=False)
+        except DownloadError as exc:
+            if "Requested format is not available" not in str(exc):
+                raise
+            # Fallback to broader format selection when strict bestaudio is unavailable.
+            fallback_ydl = YoutubeDL(self._build_ydl_options(format_selector='best'))
+            info = fallback_ydl.extract_info(source_url, download=False)
         direct = info.get('url')
         if direct:
             return direct

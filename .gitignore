@@ -1,0 +1,6 @@
+# Sensitive local files
+cookies.txt
+
+# Optional local exports
+*.cookies.txt
+*.b64
