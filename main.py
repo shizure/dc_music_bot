@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import os, asyncio
 import shutil
+import ctypes.util
 
 try:
     import nacl  # noqa: F401
@@ -19,6 +20,29 @@ bot = commands.Bot(command_prefix='?', intents=intents)
 
 #remove the default help command so that we can write out own
 bot.remove_command('help')
+
+
+def ensure_opus_loaded() -> bool:
+    if discord.opus.is_loaded():
+        return True
+
+    # Try common Linux/OpenSSL-compatible names first, then system discovery.
+    candidates = [
+        "libopus.so.0",
+        "libopus.so",
+        "opus",
+        ctypes.util.find_library("opus"),
+    ]
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            discord.opus.load_opus(candidate)
+            return True
+        except Exception:
+            continue
+    return False
 
 
 @bot.event
@@ -48,6 +72,8 @@ async def main():
             print(f"FFmpeg not found for binary: {ffmpeg_binary}")
         print(f"Music cog FFmpeg executable: {music.ffmpeg_executable}")
         print(f"PyNaCl available: {HAS_NACL}")
+        opus_ok = ensure_opus_loaded()
+        print(f"Opus loaded: {opus_ok}")
         print("Starting Discord bot connection...")
         await bot.start(token)
 

@@ -21,7 +21,10 @@ class music_cog(commands.Cog):
 
         # 2d array containing [song, channel]
         self.music_queue = []
-        self.YDL_OPTIONS = {'format': 'bestaudio/best'}
+        self.YDL_OPTIONS = {
+            'format': 'bestaudio/best',
+            'js_runtimes': 'node',
+        }
         self.FFMPEG_OPTIONS = {'options': '-vn'}
         requested_binary = os.getenv("FFMPEG_PATH", "ffmpeg")
         self.ffmpeg_executable = requested_binary
