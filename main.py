@@ -3,6 +3,12 @@ from discord.ext import commands
 import os, asyncio
 import shutil
 
+try:
+    import nacl  # noqa: F401
+    HAS_NACL = True
+except Exception:
+    HAS_NACL = False
+
 #import all of the cogs
 from help_cog import help_cog
 from music_cog import music_cog
@@ -41,6 +47,7 @@ async def main():
         else:
             print(f"FFmpeg not found for binary: {ffmpeg_binary}")
         print(f"Music cog FFmpeg executable: {music.ffmpeg_executable}")
+        print(f"PyNaCl available: {HAS_NACL}")
         print("Starting Discord bot connection...")
         await bot.start(token)
 

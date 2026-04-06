@@ -1,8 +1,11 @@
 [phases.setup]
 nixPkgs = ["python311", "ffmpeg"]
 
+[variables]
+NIXPACKS_PYTHON_VERSION = "3.11"
+
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["python -m pip install --upgrade pip", "python -m pip install -r requirements.txt"]
 
 [start]
 cmd = "python control_panel.py"
