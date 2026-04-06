@@ -24,9 +24,12 @@ class music_cog(commands.Cog):
         self.YDL_OPTIONS = {
             'format': 'bestaudio/best',
             'js_runtimes': {'node': {}},
-            'extractor_args': {'youtube': {'player_client': ['android']}},
+            'noplaylist': True,
         }
-        self.FFMPEG_OPTIONS = {'options': '-vn'}
+        self.FFMPEG_OPTIONS = {
+            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn',
+        }
         requested_binary = os.getenv("FFMPEG_PATH", "ffmpeg")
         self.ffmpeg_executable = requested_binary
         if shutil.which(requested_binary) is None and imageio_ffmpeg is not None:
@@ -39,6 +42,27 @@ class music_cog(commands.Cog):
         except ValueError:
             # Keep startup resilient if yt-dlp changes option schema.
             self.ytdl = YoutubeDL({'format': 'bestaudio/best'})
+
+    def _extract_audio_stream_url(self, source_url: str) -> str:
+        info = self.ytdl.extract_info(source_url, download=False)
+        direct = info.get('url')
+        if direct:
+            return direct
+
+        formats = info.get('formats') or []
+        for fmt in reversed(formats):
+            if fmt.get('acodec') in (None, 'none'):
+                continue
+            stream_url = fmt.get('url')
+            if stream_url:
+                return stream_url
+
+        raise RuntimeError('Could not find a playable audio stream URL from yt-dlp result.')
+
+    def _after_play(self, error):
+        if error is not None:
+            print(f"Playback error: {error}")
+        asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
 
      #searching the item on youtube
     def search_yt(self, item):
@@ -58,9 +82,11 @@ class music_cog(commands.Cog):
             #remove the first element as you are currently playing it
             self.music_queue.pop(0)
             loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(m_url, download=False))
-            song = data['url']
-            self.vc.play(discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS), after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop))
+            song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
+            self.vc.play(
+                discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS),
+                after=self._after_play,
+            )
         else:
             self.is_playing = False
 
@@ -86,9 +112,19 @@ class music_cog(commands.Cog):
             #remove the first element as you are currently playing it
             self.music_queue.pop(0)
             loop = asyncio.get_event_loop()
-            data = await loop.run_in_executor(None, lambda: self.ytdl.extract_info(m_url, download=False))
-            song = data['url']
-            self.vc.play(discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS), after=lambda e: asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop))
+            try:
+                song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
+            except Exception as exc:
+                print(f"Stream extraction failed: {exc}")
+                await ctx.send("```Could not get a playable stream URL from YouTube. Try another track.```")
+                self.is_playing = False
+                return
+
+            print(f"Starting playback via: {song[:120]}")
+            self.vc.play(
+                discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS),
+                after=self._after_play,
+            )
 
         else:
             self.is_playing = False
