@@ -26,3 +26,4 @@ typing_extensions
 wrapt
 yarl
 yt-dlp
+youtube-search-python
