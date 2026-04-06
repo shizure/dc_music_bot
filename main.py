@@ -29,7 +29,8 @@ async def on_command_error(ctx, error):
 async def main():
     async with bot:
         await bot.add_cog(help_cog(bot))
-        await bot.add_cog(music_cog(bot))
+        music = music_cog(bot)
+        await bot.add_cog(music)
         token = os.getenv('TOKEN') or os.getenv('DISCORD_TOKEN')
         if not token:
             raise RuntimeError("Set TOKEN (or DISCORD_TOKEN) before starting the bot.")
@@ -39,6 +40,7 @@ async def main():
             print(f"FFmpeg detected at: {ffmpeg_path}")
         else:
             print(f"FFmpeg not found for binary: {ffmpeg_binary}")
+        print(f"Music cog FFmpeg executable: {music.ffmpeg_executable}")
         print("Starting Discord bot connection...")
         await bot.start(token)
 

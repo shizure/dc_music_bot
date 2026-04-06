@@ -4,6 +4,12 @@ from youtubesearchpython import VideosSearch
 from yt_dlp import YoutubeDL
 import asyncio
 import os
+import shutil
+
+try:
+    import imageio_ffmpeg
+except ImportError:
+    imageio_ffmpeg = None
 
 class music_cog(commands.Cog):
     def __init__(self, bot):
@@ -17,7 +23,11 @@ class music_cog(commands.Cog):
         self.music_queue = []
         self.YDL_OPTIONS = {'format': 'bestaudio/best'}
         self.FFMPEG_OPTIONS = {'options': '-vn'}
-        self.ffmpeg_executable = os.getenv("FFMPEG_PATH", "ffmpeg")
+        requested_binary = os.getenv("FFMPEG_PATH", "ffmpeg")
+        self.ffmpeg_executable = requested_binary
+        if shutil.which(requested_binary) is None and imageio_ffmpeg is not None:
+            # Fall back to bundled static ffmpeg when host image lacks system ffmpeg.
+            self.ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
 
         self.vc = None
         self.ytdl = YoutubeDL(self.YDL_OPTIONS)
