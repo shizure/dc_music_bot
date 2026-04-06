@@ -42,11 +42,18 @@ class music_cog(commands.Cog):
             # Keep startup resilient if yt-dlp changes option schema.
             self.ytdl = YoutubeDL({'format': 'bestaudio/best'})
 
-    def _build_ydl_options(self, format_selector: str | None, extract_flat: bool = False) -> dict:
+    def _build_ydl_options(
+        self,
+        format_selector: str | None,
+        extract_flat: bool = False,
+        player_clients: list[str] | None = None,
+    ) -> dict:
         options = {
             'noplaylist': True,
             'js_runtimes': {'node': {}},
         }
+        if player_clients:
+            options['extractor_args'] = {'youtube': {'player_client': player_clients}}
         if format_selector:
             options['format'] = format_selector
         if extract_flat:
@@ -98,14 +105,31 @@ class music_cog(commands.Cog):
         return {'source': url, 'title': title}
 
     def _extract_audio_stream_url(self, source_url: str) -> str:
-        try:
-            info = self.ytdl.extract_info(source_url, download=False)
-        except DownloadError as exc:
-            if "Requested format is not available" not in str(exc):
-                raise
-            # Fallback to broader format selection when strict bestaudio is unavailable.
-            fallback_ydl = YoutubeDL(self._build_ydl_options(format_selector='best'))
-            info = fallback_ydl.extract_info(source_url, download=False)
+        attempts = [
+            ('bestaudio/best', ['ios', 'mweb', 'web']),
+            ('best', ['ios', 'mweb', 'web']),
+            ('bestaudio/best', ['android', 'web']),
+            ('best', ['android', 'web']),
+            (None, ['ios', 'mweb', 'web', 'android']),
+        ]
+
+        info = None
+        last_error = None
+        for fmt, clients in attempts:
+            try:
+                ydl = YoutubeDL(self._build_ydl_options(format_selector=fmt, player_clients=clients))
+                info = ydl.extract_info(source_url, download=False)
+                break
+            except DownloadError as exc:
+                last_error = exc
+                print(f"yt-dlp attempt failed (format={fmt}, clients={clients}): {exc}")
+                continue
+
+        if info is None:
+            if last_error is not None:
+                raise last_error
+            raise RuntimeError('yt-dlp failed to extract media info for this URL.')
+
         direct = info.get('url')
         if direct:
             return direct
