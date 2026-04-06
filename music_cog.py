@@ -32,8 +32,8 @@ class music_cog(commands.Cog):
         if self._cookie_file_path:
             self.YDL_OPTIONS['cookiefile'] = self._cookie_file_path
         self.FFMPEG_OPTIONS = {
-            'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-            'options': '-vn',
+            'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn -loglevel warning',
         }
         requested_binary = os.getenv("FFMPEG_PATH", "ffmpeg")
         self.ffmpeg_executable = requested_binary
@@ -104,6 +104,23 @@ class music_cog(commands.Cog):
             print(f"Playback error: {error}")
         asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
 
+    def _build_audio_source(self, stream_url: str):
+        try:
+            # Prefer passthrough for YouTube Opus streams to avoid heavy transcoding crashes.
+            return discord.FFmpegOpusAudio(
+                stream_url,
+                executable=self.ffmpeg_executable,
+                codec='copy',
+                **self.FFMPEG_OPTIONS,
+            )
+        except Exception as exc:
+            print(f"FFmpegOpusAudio codec=copy failed, falling back to libopus: {exc}")
+            return discord.FFmpegOpusAudio(
+                stream_url,
+                executable=self.ffmpeg_executable,
+                **self.FFMPEG_OPTIONS,
+            )
+
      #searching the item on youtube
     def search_yt(self, item):
         if item.startswith("https://"):
@@ -127,10 +144,8 @@ class music_cog(commands.Cog):
                 print(f"Stream extraction failed in play_next: {exc}")
                 self.is_playing = False
                 return
-            self.vc.play(
-                discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS),
-                after=self._after_play,
-            )
+            source = self._build_audio_source(song)
+            self.vc.play(source, after=self._after_play)
         else:
             self.is_playing = False
 
@@ -170,10 +185,14 @@ class music_cog(commands.Cog):
                 return
 
             print(f"Starting playback via: {song[:120]}")
-            self.vc.play(
-                discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS),
-                after=self._after_play,
-            )
+            try:
+                source = self._build_audio_source(song)
+                self.vc.play(source, after=self._after_play)
+            except Exception as exc:
+                print(f"Failed to start FFmpeg playback: {exc}")
+                await ctx.send("```Playback process could not start. Try another track.```")
+                self.is_playing = False
+                return
 
         else:
             self.is_playing = False
