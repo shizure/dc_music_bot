@@ -1,10 +1,11 @@
 import discord
 from discord.ext import commands
-from youtubesearchpython import VideosSearch
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 import asyncio
+import base64
 import os
+from pathlib import Path
 import shutil
 
 try:
@@ -22,11 +23,14 @@ class music_cog(commands.Cog):
 
         # 2d array containing [song, channel]
         self.music_queue = []
+        self._cookie_file_path = self._write_cookie_file_from_env()
         self.YDL_OPTIONS = {
             'format': 'bestaudio/best',
             'js_runtimes': {'node': {}},
             'noplaylist': True,
         }
+        if self._cookie_file_path:
+            self.YDL_OPTIONS['cookiefile'] = self._cookie_file_path
         self.FFMPEG_OPTIONS = {
             'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
             'options': '-vn',
@@ -43,6 +47,41 @@ class music_cog(commands.Cog):
         except ValueError:
             # Keep startup resilient if yt-dlp changes option schema.
             self.ytdl = YoutubeDL({'format': 'bestaudio/best'})
+
+    def _write_cookie_file_from_env(self) -> str | None:
+        cookie_path = os.getenv("YTDLP_COOKIE_FILE")
+        if cookie_path:
+            p = Path(cookie_path)
+            if p.exists():
+                print(f"Using yt-dlp cookie file: {p}")
+                return str(p)
+            print(f"YTDLP_COOKIE_FILE not found: {p}")
+
+        raw_b64 = os.getenv("YTDLP_COOKIES_B64")
+        if not raw_b64:
+            return None
+
+        try:
+            cookie_text = base64.b64decode(raw_b64).decode("utf-8")
+            cookie_file = Path("/tmp/youtube_cookies.txt")
+            cookie_file.write_text(cookie_text, encoding="utf-8")
+            print("Wrote yt-dlp cookies from YTDLP_COOKIES_B64 to /tmp/youtube_cookies.txt")
+            return str(cookie_file)
+        except Exception as exc:
+            print(f"Failed to decode YTDLP_COOKIES_B64: {exc}")
+            return None
+
+    def _search_with_ytdlp(self, query: str) -> dict:
+        info = self.ytdl.extract_info(f"ytsearch1:{query}", download=False)
+        entries = info.get("entries") or []
+        if not entries:
+            raise RuntimeError("No search results returned by yt-dlp")
+        first = entries[0]
+        url = first.get("webpage_url") or first.get("url")
+        title = first.get("title") or "Search result"
+        if not url:
+            raise RuntimeError("Search result did not include a URL")
+        return {'source': url, 'title': title}
 
     def _extract_audio_stream_url(self, source_url: str) -> str:
         info = self.ytdl.extract_info(source_url, download=False)
@@ -70,8 +109,7 @@ class music_cog(commands.Cog):
         if item.startswith("https://"):
             # Avoid a heavy metadata request here; extraction is handled right before playback.
             return {'source': item, 'title': 'Requested URL'}
-        search = VideosSearch(item, limit=1)
-        return{'source':search.result()["result"][0]["link"], 'title':search.result()["result"][0]["title"]}
+        return self._search_with_ytdlp(item)
 
     async def play_next(self):
         if len(self.music_queue) > 0:

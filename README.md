@@ -7,6 +7,10 @@ This repo includes [nixpacks.toml](nixpacks.toml), so Railway installs FFmpeg au
 Required variable:
 - TOKEN
 
+Optional variables for YouTube anti-bot pages:
+- YTDLP_COOKIE_FILE: absolute path to a cookies.txt file in Netscape format
+- YTDLP_COOKIES_B64: base64-encoded contents of cookies.txt (the app writes it to /tmp)
+
 After deploy/redeploy, verify FFmpeg in Railway logs:
 - Look for: "FFmpeg detected at: ..."
 
