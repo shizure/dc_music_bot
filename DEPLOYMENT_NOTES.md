@@ -9,6 +9,23 @@ This means:
 - The dashboard UI can be deployed on Vercel.
 - The Discord bot process itself should run on a persistent host (Railway, Render, Fly.io, VPS).
 
+If you click Start on Vercel, the API now returns a clear message explaining this limitation.
+
+## Vercel environment variable setup
+
+If your dashboard/API on Vercel still needs token-aware checks, add one of these env vars:
+- `TOKEN`
+- `DISCORD_TOKEN`
+
+In Vercel:
+1. Open your project.
+2. Go to Settings > Environment Variables.
+3. Add key `TOKEN` with your Discord bot token value.
+4. Select Production (and Preview/Development if needed).
+5. Redeploy the project so the new variable is applied.
+
+You can verify by opening the deployment and checking Runtime Logs for startup messages.
+
 ## Recommended architecture
 
 1. Deploy this dashboard where your bot process runs, OR

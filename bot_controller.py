@@ -3,6 +3,7 @@ import subprocess
 import sys
 import threading
 import time
+from itertools import islice
 from collections import deque
 from pathlib import Path
 
@@ -28,15 +29,31 @@ class BotController:
         for line in process.stdout:
             self._append_log(line)
 
+    def _tail_logs(self, count: int = 8) -> list[str]:
+        if count <= 0:
+            return []
+        return list(islice(self._logs, max(0, len(self._logs) - count), len(self._logs)))
+
     def start(self) -> dict:
         with self._lock:
             if self.is_running():
                 return {"ok": False, "message": "Bot is already running."}
 
-            if not os.getenv("TOKEN"):
+            # Discord bots need a persistent runtime; Vercel serverless cannot host this process.
+            if os.getenv("VERCEL") == "1":
                 return {
                     "ok": False,
-                    "message": "TOKEN environment variable is not set.",
+                    "message": (
+                        "Start is disabled on Vercel serverless. "
+                        "Run the bot on Railway/Render/Fly.io/VPS and keep this panel as UI only."
+                    ),
+                }
+
+            token = os.getenv("TOKEN") or os.getenv("DISCORD_TOKEN")
+            if not token:
+                return {
+                    "ok": False,
+                    "message": "Set TOKEN (or DISCORD_TOKEN) environment variable.",
                 }
 
             script_path = self._base_dir / self.bot_script
@@ -48,7 +65,7 @@ class BotController:
 
             self._append_log("Starting bot process...")
             self._process = subprocess.Popen(
-                [sys.executable, str(script_path)],
+                [sys.executable, "-u", str(script_path)],
                 cwd=str(self._base_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
@@ -64,6 +81,20 @@ class BotController:
                 daemon=True,
             )
             log_thread.start()
+
+            # Give the child process a moment to fail fast on import/token/login issues.
+            time.sleep(1.2)
+            if self._process.poll() is not None:
+                exit_code = self._process.returncode
+                recent_logs = self._tail_logs(10)
+                self._append_log(f"Bot exited early with code {exit_code}.")
+                self._started_at = None
+                return {
+                    "ok": False,
+                    "message": "Bot process exited right after start. Check logs for details.",
+                    "exit_code": exit_code,
+                    "logs_tail": recent_logs,
+                }
 
             return {
                 "ok": True,
