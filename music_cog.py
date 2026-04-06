@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from youtubesearchpython import VideosSearch
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 import asyncio
 import os
 import shutil
@@ -67,8 +68,8 @@ class music_cog(commands.Cog):
      #searching the item on youtube
     def search_yt(self, item):
         if item.startswith("https://"):
-            title = self.ytdl.extract_info(item, download=False)["title"]
-            return{'source':item, 'title':title}
+            # Avoid a heavy metadata request here; extraction is handled right before playback.
+            return {'source': item, 'title': 'Requested URL'}
         search = VideosSearch(item, limit=1)
         return{'source':search.result()["result"][0]["link"], 'title':search.result()["result"][0]["title"]}
 
@@ -82,7 +83,12 @@ class music_cog(commands.Cog):
             #remove the first element as you are currently playing it
             self.music_queue.pop(0)
             loop = asyncio.get_event_loop()
-            song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
+            try:
+                song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
+            except Exception as exc:
+                print(f"Stream extraction failed in play_next: {exc}")
+                self.is_playing = False
+                return
             self.vc.play(
                 discord.FFmpegOpusAudio(song, executable=self.ffmpeg_executable, **self.FFMPEG_OPTIONS),
                 after=self._after_play,
@@ -114,6 +120,11 @@ class music_cog(commands.Cog):
             loop = asyncio.get_event_loop()
             try:
                 song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
+            except DownloadError as exc:
+                print(f"YouTube extraction blocked: {exc}")
+                await ctx.send("```YouTube blocked this request (bot-check/cookies required). Try another video or use search keywords.```")
+                self.is_playing = False
+                return
             except Exception as exc:
                 print(f"Stream extraction failed: {exc}")
                 await ctx.send("```Could not get a playable stream URL from YouTube. Try another track.```")
@@ -140,7 +151,16 @@ class music_cog(commands.Cog):
         if self.is_paused:
             self.vc.resume()
         else:
-            song = self.search_yt(query)
+            try:
+                song = self.search_yt(query)
+            except DownloadError as exc:
+                print(f"YouTube metadata blocked: {exc}")
+                await ctx.send("```YouTube blocked metadata lookup for this URL. Try another video or use keywords instead.```")
+                return
+            except Exception as exc:
+                print(f"Search failed: {exc}")
+                await ctx.send("```Could not process that query. Try another link or keywords.```")
+                return
             if type(song) == type(True):
                 await ctx.send("```Could not download the song. Incorrect format try another keyword. This could be due to playlist or a livestream format.```")
             else:
