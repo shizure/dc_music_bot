@@ -5,7 +5,6 @@ class help_cog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.help_message = ""
-        self.text_channel_list = []
         self.set_message()
 
     def set_message(self):
@@ -39,8 +38,3 @@ General commands:
         self.set_message()
         await ctx.send(f"prefix set to **'{self.bot.command_prefix}'**")
         await self.bot.change_presence(activity=discord.Game(f"type {self.bot.command_prefix}help"))
-
-    @commands.command(name="send_to_all", help="send a message to all members")
-    async def send_to_all(self, msg):
-        for text_channel in self.text_channel_list:
-            await text_channel.send(msg)

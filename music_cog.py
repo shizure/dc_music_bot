@@ -4,9 +4,17 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 import asyncio
 import base64
+import json
+import logging
 import os
+import re
+import time
 from pathlib import Path
 import shutil
+from html import unescape
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 try:
     import imageio_ffmpeg
@@ -16,13 +24,21 @@ except ImportError:
 class music_cog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._logger = logging.getLogger(__name__)
     
-        #all the music related stuff
+        # all the music related stuff
         self.is_playing = False
         self.is_paused = False
 
         # 2d array containing [song, channel]
         self.music_queue = []
+        self.youtube_api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
+        self.youtube_search_mode = os.getenv("YOUTUBE_SEARCH_MODE", "fallback").strip().lower()
+        self.youtube_url_metadata_api = os.getenv("YOUTUBE_API_LOOKUP_URLS", "0").strip().lower() in ('1', 'true', 'yes', 'on')
+        self._yt_cache_ttl_seconds = self._read_int_env("YOUTUBE_API_CACHE_TTL_SECONDS", 21600)
+        self._yt_cache_max_entries = self._read_int_env("YOUTUBE_API_CACHE_MAX_ENTRIES", 256)
+        self._yt_cache = {}
+
         self._cookie_file_path = self._write_cookie_file_from_env()
         self.YDL_OPTIONS = self._build_ydl_options(format_selector='bestaudio/best')
         self.FFMPEG_OPTIONS = {
@@ -36,11 +52,186 @@ class music_cog(commands.Cog):
             self.ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
 
         self.vc = None
+
+    def _read_int_env(self, name: str, default: int) -> int:
+        raw = os.getenv(name)
+        if not raw:
+            return default
         try:
-            self.ytdl = YoutubeDL(self.YDL_OPTIONS)
+            value = int(raw)
+            return value if value > 0 else default
         except ValueError:
-            # Keep startup resilient if yt-dlp changes option schema.
-            self.ytdl = YoutubeDL({'format': 'bestaudio/best'})
+            return default
+
+    def _cache_get(self, key: str):
+        entry = self._yt_cache.get(key)
+        if not entry:
+            return None
+        expires_at, value = entry
+        if time.time() > expires_at:
+            self._yt_cache.pop(key, None)
+            return None
+        return value
+
+    def _cache_set(self, key: str, value: dict):
+        while len(self._yt_cache) >= self._yt_cache_max_entries:
+            oldest = next(iter(self._yt_cache), None)
+            if oldest is None:
+                break
+            self._yt_cache.pop(oldest, None)
+        self._yt_cache[key] = (time.time() + self._yt_cache_ttl_seconds, value)
+
+    def _extract_video_id(self, value: str) -> str | None:
+        try:
+            parsed = urlparse(value.strip())
+        except Exception:
+            return None
+
+        host = parsed.netloc.lower()
+        if host.startswith('www.'):
+            host = host[4:]
+
+        if host == 'youtu.be':
+            video_id = parsed.path.strip('/').split('/')[0]
+            return video_id or None
+
+        if host in ('youtube.com', 'm.youtube.com', 'music.youtube.com'):
+            if parsed.path == '/watch':
+                query = parse_qs(parsed.query)
+                vid = query.get('v', [None])[0]
+                return vid
+
+            match = re.match(r'^/(shorts|embed|live)/([^/?#]+)', parsed.path)
+            if match:
+                return match.group(2)
+
+        return None
+
+    def _youtube_api_get(self, endpoint: str, params: dict) -> dict:
+        if not self.youtube_api_key:
+            raise RuntimeError('YOUTUBE_API_KEY is not configured')
+        request_params = dict(params)
+        request_params['key'] = self.youtube_api_key
+        url = f"https://www.googleapis.com/youtube/v3/{endpoint}?{urlencode(request_params)}"
+        req = Request(url, headers={'Accept': 'application/json', 'User-Agent': 'dc-music-bot/1.0'})
+
+        try:
+            with urlopen(req, timeout=8) as response:
+                raw = response.read().decode('utf-8')
+        except HTTPError as exc:
+            raise RuntimeError(f'YouTube API HTTP error: {exc.code}') from exc
+        except URLError as exc:
+            raise RuntimeError(f'YouTube API network error: {exc.reason}') from exc
+
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError('YouTube API returned invalid JSON') from exc
+
+        if payload.get('error'):
+            message = payload['error'].get('message', 'Unknown YouTube API error')
+            raise RuntimeError(message)
+        return payload
+
+    def _search_with_youtube_api(self, query: str) -> dict:
+        cache_key = f"search:api:{query.strip().lower()}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+
+        payload = self._youtube_api_get(
+            endpoint='search',
+            params={
+                'part': 'snippet',
+                'type': 'video',
+                'maxResults': 1,
+                'q': query,
+                'videoEmbeddable': 'true',
+                'videoSyndicated': 'true',
+                'fields': 'items(id/videoId,snippet/title,snippet/liveBroadcastContent)',
+            },
+        )
+
+        items = payload.get('items') or []
+        if not items:
+            raise RuntimeError('No search results returned by YouTube API')
+
+        first = items[0]
+        video_id = (first.get('id') or {}).get('videoId')
+        if not video_id:
+            raise RuntimeError('Search result did not include a video ID')
+
+        snippet = first.get('snippet') or {}
+        if snippet.get('liveBroadcastContent') in ('live', 'upcoming'):
+            raise RuntimeError('Top result is a live stream; try a different query')
+
+        result = {
+            'source': f'https://www.youtube.com/watch?v={video_id}',
+            'title': unescape(snippet.get('title') or 'Search result'),
+        }
+        self._cache_set(cache_key, result)
+        return result
+
+    def _get_video_metadata_with_api(self, video_id: str) -> dict | None:
+        cache_key = f"video:api:{video_id}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+
+        payload = self._youtube_api_get(
+            endpoint='videos',
+            params={
+                'part': 'snippet',
+                'id': video_id,
+                'maxResults': 1,
+                'fields': 'items(id,snippet/title,snippet/liveBroadcastContent)',
+            },
+        )
+        items = payload.get('items') or []
+        if not items:
+            return None
+
+        snippet = items[0].get('snippet') or {}
+        data = {
+            'title': unescape(snippet.get('title') or 'Requested URL'),
+            'is_live': snippet.get('liveBroadcastContent') in ('live', 'upcoming'),
+        }
+        self._cache_set(cache_key, data)
+        return data
+
+    def _search_keywords(self, query: str) -> dict:
+        cache_key = f"search:any:{query.strip().lower()}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+
+        mode = self.youtube_search_mode
+        if mode not in ('fallback', 'api', 'ytdlp'):
+            mode = 'fallback'
+
+        if mode == 'ytdlp' or not self.youtube_api_key:
+            result = self._search_with_ytdlp(query)
+            self._cache_set(cache_key, result)
+            return result
+
+        if mode == 'api':
+            try:
+                result = self._search_with_youtube_api(query)
+            except Exception as api_error:
+                self._logger.warning('YouTube API search failed; falling back to yt-dlp: %s', api_error)
+                result = self._search_with_ytdlp(query)
+            self._cache_set(cache_key, result)
+            return result
+
+        try:
+            result = self._search_with_ytdlp(query)
+            self._cache_set(cache_key, result)
+            return result
+        except Exception as ytdlp_error:
+            self._logger.warning('yt-dlp search failed; falling back to YouTube API: %s', ytdlp_error)
+            result = self._search_with_youtube_api(query)
+            self._cache_set(cache_key, result)
+            return result
 
     def _build_ydl_options(
         self,
@@ -48,12 +239,34 @@ class music_cog(commands.Cog):
         extract_flat: bool = False,
         player_clients: list[str] | None = None,
     ) -> dict:
+        youtube_args = {}
+        if player_clients:
+            youtube_args['player_client'] = player_clients
+
+        # Optional yt-dlp anti-bot inputs from environment variables.
+        # Example values:
+        # YTDLP_MWEB_PO_TOKEN="mweb.gvs+XXX"
+        # YTDLP_WEB_PO_TOKEN="web.gvs+XXX"
+        # YTDLP_DATA_SYNC_ID="XXX"
+        mweb_po_token = os.getenv('YTDLP_MWEB_PO_TOKEN')
+        web_po_token = os.getenv('YTDLP_WEB_PO_TOKEN')
+        data_sync_id = os.getenv('YTDLP_DATA_SYNC_ID')
+        po_tokens = []
+        if mweb_po_token:
+            po_tokens.append(mweb_po_token)
+        if web_po_token:
+            po_tokens.append(web_po_token)
+        if po_tokens:
+            youtube_args['po_token'] = po_tokens
+        if data_sync_id:
+            youtube_args['data_sync_id'] = [data_sync_id]
+
         options = {
             'noplaylist': True,
             'js_runtimes': {'node': {}},
         }
-        if player_clients:
-            options['extractor_args'] = {'youtube': {'player_client': player_clients}}
+        if youtube_args:
+            options['extractor_args'] = {'youtube': youtube_args}
         if format_selector:
             options['format'] = format_selector
         if extract_flat:
@@ -69,9 +282,9 @@ class music_cog(commands.Cog):
         if cookie_path:
             p = Path(cookie_path)
             if p.exists():
-                print(f"Using yt-dlp cookie file: {p}")
+                self._logger.info('Using yt-dlp cookie file: %s', p)
                 return str(p)
-            print(f"YTDLP_COOKIE_FILE not found: {p}")
+            self._logger.warning('YTDLP_COOKIE_FILE not found: %s', p)
 
         raw_b64 = os.getenv("YTDLP_COOKIES_B64")
         if not raw_b64:
@@ -81,10 +294,10 @@ class music_cog(commands.Cog):
             cookie_text = base64.b64decode(raw_b64).decode("utf-8")
             cookie_file = Path("/tmp/youtube_cookies.txt")
             cookie_file.write_text(cookie_text, encoding="utf-8")
-            print("Wrote yt-dlp cookies from YTDLP_COOKIES_B64 to /tmp/youtube_cookies.txt")
+            self._logger.info('Wrote yt-dlp cookies from YTDLP_COOKIES_B64 to /tmp/youtube_cookies.txt')
             return str(cookie_file)
         except Exception as exc:
-            print(f"Failed to decode YTDLP_COOKIES_B64: {exc}")
+            self._logger.warning('Failed to decode YTDLP_COOKIES_B64: %s', exc)
             return None
 
     def _search_with_ytdlp(self, query: str) -> dict:
@@ -102,15 +315,17 @@ class music_cog(commands.Cog):
         title = first.get("title") or "Search result"
         if not url:
             raise RuntimeError("Search result did not include a URL")
-        return {'source': url, 'title': title}
+        return {'source': url, 'title': unescape(title)}
 
     def _extract_audio_stream_url(self, source_url: str) -> str:
         attempts = [
+            ('bestaudio/best', ['tv', 'tv_simply']),
+            ('best', ['tv', 'tv_simply']),
             ('bestaudio/best', ['ios', 'mweb', 'web']),
             ('best', ['ios', 'mweb', 'web']),
             ('bestaudio/best', ['android', 'web']),
             ('best', ['android', 'web']),
-            (None, ['ios', 'mweb', 'web', 'android']),
+            (None, ['tv', 'tv_simply', 'ios', 'mweb', 'web', 'android']),
         ]
 
         info = None
@@ -122,7 +337,7 @@ class music_cog(commands.Cog):
                 break
             except DownloadError as exc:
                 last_error = exc
-                print(f"yt-dlp attempt failed (format={fmt}, clients={clients}): {exc}")
+                self._logger.warning('yt-dlp extraction attempt failed (format=%s clients=%s): %s', fmt, clients, exc)
                 continue
 
         if info is None:
@@ -146,7 +361,7 @@ class music_cog(commands.Cog):
 
     def _after_play(self, error):
         if error is not None:
-            print(f"Playback error: {error}")
+            self._logger.warning('Playback error: %s', error)
         asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
 
     def _build_audio_source(self, stream_url: str):
@@ -159,19 +374,33 @@ class music_cog(commands.Cog):
                 **self.FFMPEG_OPTIONS,
             )
         except Exception as exc:
-            print(f"FFmpegOpusAudio codec=copy failed, falling back to libopus: {exc}")
+            self._logger.warning('FFmpegOpusAudio codec=copy failed, falling back to libopus: %s', exc)
             return discord.FFmpegOpusAudio(
                 stream_url,
                 executable=self.ffmpeg_executable,
                 **self.FFMPEG_OPTIONS,
             )
 
-     #searching the item on youtube
+    # searching the item on youtube
     def search_yt(self, item):
-        if item.startswith("https://"):
-            # Avoid a heavy metadata request here; extraction is handled right before playback.
-            return {'source': item, 'title': 'Requested URL'}
-        return self._search_with_ytdlp(item)
+        item = item.strip()
+        if item.startswith(('https://', 'http://')):
+            video_id = self._extract_video_id(item)
+            canonical_url = f'https://www.youtube.com/watch?v={video_id}' if video_id else item
+
+            if self.youtube_api_key and self.youtube_url_metadata_api and video_id:
+                try:
+                    metadata = self._get_video_metadata_with_api(video_id)
+                    if metadata and metadata.get('is_live'):
+                        raise RuntimeError('Live streams are not supported in this bot')
+                    if metadata:
+                        return {'source': canonical_url, 'title': metadata['title']}
+                except Exception as exc:
+                    self._logger.warning('YouTube API metadata lookup failed for %s: %s', video_id, exc)
+
+            return {'source': canonical_url, 'title': 'Requested URL'}
+
+        return self._search_keywords(item)
 
     async def play_next(self):
         if len(self.music_queue) > 0:
@@ -186,7 +415,7 @@ class music_cog(commands.Cog):
             try:
                 song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
             except Exception as exc:
-                print(f"Stream extraction failed in play_next: {exc}")
+                self._logger.warning('Stream extraction failed in play_next: %s', exc)
                 self.is_playing = False
                 return
             source = self._build_audio_source(song)
@@ -196,16 +425,13 @@ class music_cog(commands.Cog):
 
     # infinite loop checking 
     async def play_music(self, ctx):
-        print(f"play_music called. queue length: {len(self.music_queue)}, is_playing: {self.is_playing}")
         if len(self.music_queue) > 0:
             self.is_playing = True
 
             m_url = self.music_queue[0][0]['source']
             #try to connect to voice channel if you are not already connected
             if self.vc == None or not self.vc.is_connected():
-                print(f"Attempting to connect to: {self.music_queue[0][1]}")
                 self.vc = await self.music_queue[0][1].connect()
-                print(f"Connected: {self.vc}")
 
                 #in case we fail to connect
                 if self.vc == None:
@@ -219,22 +445,21 @@ class music_cog(commands.Cog):
             try:
                 song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
             except DownloadError as exc:
-                print(f"YouTube extraction blocked: {exc}")
+                self._logger.warning('YouTube extraction blocked: %s', exc)
                 await ctx.send("```YouTube blocked this request (bot-check/cookies required). Try another video or use search keywords.```")
                 self.is_playing = False
                 return
             except Exception as exc:
-                print(f"Stream extraction failed: {exc}")
+                self._logger.warning('Stream extraction failed: %s', exc)
                 await ctx.send("```Could not get a playable stream URL from YouTube. Try another track.```")
                 self.is_playing = False
                 return
 
-            print(f"Starting playback via: {song[:120]}")
             try:
                 source = self._build_audio_source(song)
                 self.vc.play(source, after=self._after_play)
             except Exception as exc:
-                print(f"Failed to start FFmpeg playback: {exc}")
+                self._logger.warning('Failed to start FFmpeg playback: %s', exc)
                 await ctx.send("```Playback process could not start. Try another track.```")
                 self.is_playing = False
                 return
@@ -247,32 +472,30 @@ class music_cog(commands.Cog):
         query = " ".join(args)
         try:
             voice_channel = ctx.author.voice.channel
-        except:
+        except Exception:
             await ctx.send("```You need to connect to a voice channel first!```")
             return
         if self.is_paused:
-            self.vc.resume()
+            if self.vc:
+                self.vc.resume()
         else:
             try:
                 song = self.search_yt(query)
             except DownloadError as exc:
-                print(f"YouTube metadata blocked: {exc}")
+                self._logger.warning('YouTube metadata blocked: %s', exc)
                 await ctx.send("```YouTube blocked metadata lookup for this URL. Try another video or use keywords instead.```")
                 return
             except Exception as exc:
-                print(f"Search failed: {exc}")
+                self._logger.warning('Search failed: %s', exc)
                 await ctx.send("```Could not process that query. Try another link or keywords.```")
                 return
-            if type(song) == type(True):
-                await ctx.send("```Could not download the song. Incorrect format try another keyword. This could be due to playlist or a livestream format.```")
+            if self.is_playing:
+                await ctx.send(f"**#{len(self.music_queue)+2} -'{song['title']}'** added to the queue")
             else:
-                if self.is_playing:
-                    await ctx.send(f"**#{len(self.music_queue)+2} -'{song['title']}'** added to the queue")  
-                else:
-                    await ctx.send(f"**'{song['title']}'** added to the queue")  
-                self.music_queue.append([song, voice_channel])
-                if self.is_playing == False:
-                    await self.play_music(ctx)
+                await ctx.send(f"**'{song['title']}'** added to the queue")
+            self.music_queue.append([song, voice_channel])
+            if self.is_playing == False:
+                await self.play_music(ctx)
 
     @commands.command(name="pause", help="Pauses the current song being played")
     async def pause(self, ctx, *args):
@@ -322,9 +545,13 @@ class music_cog(commands.Cog):
     async def dc(self, ctx):
         self.is_playing = False
         self.is_paused = False
-        await self.vc.disconnect()
+        if self.vc and self.vc.is_connected():
+            await self.vc.disconnect()
     
     @commands.command(name="remove", help="Removes last song added to queue")
     async def re(self, ctx):
+        if not self.music_queue:
+            await ctx.send("```Queue is already empty```")
+            return
         self.music_queue.pop()
         await ctx.send("```last song removed```")

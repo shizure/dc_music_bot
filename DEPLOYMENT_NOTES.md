@@ -17,10 +17,17 @@ If your dashboard/API on Vercel still needs token-aware checks, add one of these
 - `TOKEN`
 - `DISCORD_TOKEN`
 
+If your bot host should use YouTube Data API v3 search fallback, also set:
+- `YOUTUBE_API_KEY`
+- Optional `YOUTUBE_SEARCH_MODE` (`fallback`, `api`, `ytdlp`), default `fallback`
+- Optional `YOUTUBE_API_CACHE_TTL_SECONDS` (default `21600`)
+- Optional `YOUTUBE_API_CACHE_MAX_ENTRIES` (default `256`)
+- Optional `YOUTUBE_API_LOOKUP_URLS` (default `0` to avoid URL metadata API quota use)
+
 In Vercel:
 1. Open your project.
 2. Go to Settings > Environment Variables.
-3. Add key `TOKEN` with your Discord bot token value.
+3. Add key `TOKEN` with your Discord bot token value (and optional YouTube variables above).
 4. Select Production (and Preview/Development if needed).
 5. Redeploy the project so the new variable is applied.
 

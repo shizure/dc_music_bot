@@ -4,3 +4,7 @@ cookies.txt
 # Optional local exports
 *.cookies.txt
 *.b64
+
+# Python cache artifacts
+__pycache__/
+*.py[cod]
