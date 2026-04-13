@@ -12,6 +12,7 @@ import re
 import time
 from pathlib import Path
 import shutil
+import uuid
 from html import unescape
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlparse
@@ -38,6 +39,7 @@ class music_cog(commands.Cog):
         self.youtube_url_metadata_api = os.getenv("YOUTUBE_API_LOOKUP_URLS", "0").strip().lower() in ('1', 'true', 'yes', 'on')
         self.use_cookie_file = os.getenv("YTDLP_USE_COOKIES", "0").strip().lower() in ('1', 'true', 'yes', 'on')
         self.prefer_opus_copy = os.getenv("FFMPEG_PREFER_COPY", "0").strip().lower() in ('1', 'true', 'yes', 'on')
+        self.pre_download_audio = os.getenv("YTDLP_PRE_DOWNLOAD", "1").strip().lower() in ('1', 'true', 'yes', 'on')
         raw_clients = os.getenv("YTDLP_PLAYER_CLIENTS", "web,mweb,android")
         self.player_clients = [client.strip() for client in raw_clients.split(',') if client.strip()]
         if not self.player_clients:
@@ -59,6 +61,9 @@ class music_cog(commands.Cog):
             self.ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
 
         self.vc = None
+        self._current_temp_file = None
+        self._temp_audio_dir = Path('/tmp/dc_music_bot_audio')
+        self._temp_audio_dir.mkdir(parents=True, exist_ok=True)
 
     def _read_int_env(self, name: str, default: int) -> int:
         raw = os.getenv(name)
@@ -424,10 +429,14 @@ class music_cog(commands.Cog):
                 continue
             if fmt.get('acodec') in (None, 'none'):
                 continue
+            if fmt.get('has_drm'):
+                continue
 
             protocol = (fmt.get('protocol') or '').lower()
             ext = (fmt.get('ext') or '').lower()
             if protocol in ('mhtml',) or ext in ('mhtml',):
+                continue
+            if 'm3u8' in protocol or 'dash' in protocol:
                 continue
 
             if fmt.get('vcodec') in (None, 'none'):
@@ -455,16 +464,91 @@ class music_cog(commands.Cog):
 
         raise RuntimeError('Could not find a playable audio stream URL from yt-dlp result.')
 
+    def _download_audio_file(self, source_url: str) -> str:
+        cookie_attempts = [True, False] if self._cookie_file_path else [False]
+        if not self.use_cookie_file:
+            cookie_attempts = [False]
+
+        last_error = None
+        for use_cookies in cookie_attempts:
+            try:
+                output_template = self._temp_audio_dir / f"%(id)s-{uuid.uuid4().hex}.%(ext)s"
+                options = self._build_ydl_options(
+                    format_selector='bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio/best',
+                    player_clients=self.player_clients,
+                    use_cookies=use_cookies,
+                )
+                options.update(
+                    {
+                        'outtmpl': str(output_template),
+                        'quiet': True,
+                        'noprogress': True,
+                        'retries': 2,
+                        'socket_timeout': 10,
+                    }
+                )
+                ydl = YoutubeDL(options)
+                info = ydl.extract_info(source_url, download=True)
+
+                requested = info.get('requested_downloads') or []
+                if requested:
+                    filepath = requested[0].get('filepath')
+                    if filepath and Path(filepath).exists():
+                        return filepath
+
+                fallback_path = ydl.prepare_filename(info)
+                if fallback_path and Path(fallback_path).exists():
+                    return fallback_path
+
+                base = info.get('id')
+                if base:
+                    matches = sorted(self._temp_audio_dir.glob(f"{base}-*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    if matches:
+                        return str(matches[0])
+
+                raise RuntimeError('yt-dlp download completed but file path was not found')
+            except Exception as exc:
+                last_error = exc
+                self._logger.warning('yt-dlp pre-download failed (cookies=%s): %s', use_cookies, exc)
+
+        if last_error:
+            raise last_error
+        raise RuntimeError('yt-dlp pre-download failed')
+
+    def _resolve_playback_input(self, source_url: str) -> dict:
+        if self.pre_download_audio:
+            try:
+                local_path = self._download_audio_file(source_url)
+                return {'input': local_path, 'temp_file': local_path}
+            except Exception as exc:
+                self._logger.warning('Pre-download failed, falling back to stream URL: %s', exc)
+
+        stream_url = self._extract_audio_stream_url(source_url)
+        return {'input': stream_url, 'temp_file': None}
+
+    def _cleanup_temp_file(self):
+        temp_file = self._current_temp_file
+        self._current_temp_file = None
+        if not temp_file:
+            return
+        try:
+            Path(temp_file).unlink(missing_ok=True)
+        except Exception as exc:
+            self._logger.warning('Failed to remove temp audio file %s: %s', temp_file, exc)
+
     def _after_play(self, error):
         if error is not None:
             self._logger.warning('Playback error: %s', error)
+        self._cleanup_temp_file()
         asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
 
-    def _build_audio_source(self, stream_url: str):
-        if self.prefer_opus_copy:
+    def _build_audio_source(self, playback_input: str):
+        local_ext = Path(playback_input).suffix.lower()
+        should_copy = self.prefer_opus_copy or local_ext in ('.opus', '.ogg', '.webm')
+        if should_copy:
             try:
                 return discord.FFmpegOpusAudio(
-                    stream_url,
+                    playback_input,
                     executable=self.ffmpeg_executable,
                     codec='copy',
                     **self.FFMPEG_OPTIONS,
@@ -473,7 +557,7 @@ class music_cog(commands.Cog):
                 self._logger.warning('FFmpegOpusAudio codec=copy failed, falling back to libopus: %s', exc)
 
         return discord.FFmpegOpusAudio(
-            stream_url,
+            playback_input,
             executable=self.ffmpeg_executable,
             codec='libopus',
             **self.FFMPEG_OPTIONS,
@@ -511,13 +595,19 @@ class music_cog(commands.Cog):
             self.music_queue.pop(0)
             loop = asyncio.get_event_loop()
             try:
-                song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
+                resolved = await loop.run_in_executor(None, lambda: self._resolve_playback_input(m_url))
             except Exception as exc:
                 self._logger.warning('Stream extraction failed in play_next: %s', exc)
                 self.is_playing = False
                 return
-            source = self._build_audio_source(song)
-            self.vc.play(source, after=self._after_play)
+            self._cleanup_temp_file()
+            self._current_temp_file = resolved.get('temp_file')
+            source = self._build_audio_source(resolved['input'])
+            try:
+                self.vc.play(source, after=self._after_play)
+            except Exception:
+                self._cleanup_temp_file()
+                raise
         else:
             self.is_playing = False
 
@@ -541,7 +631,7 @@ class music_cog(commands.Cog):
             self.music_queue.pop(0)
             loop = asyncio.get_event_loop()
             try:
-                song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
+                resolved = await loop.run_in_executor(None, lambda: self._resolve_playback_input(m_url))
             except DownloadError as exc:
                 self._logger.warning('YouTube extraction blocked: %s', exc)
                 await send_message("```YouTube blocked this request (bot-check/cookies required). Try another video or use search keywords.```")
@@ -554,9 +644,12 @@ class music_cog(commands.Cog):
                 return
 
             try:
-                source = self._build_audio_source(song)
+                self._cleanup_temp_file()
+                self._current_temp_file = resolved.get('temp_file')
+                source = self._build_audio_source(resolved['input'])
                 self.vc.play(source, after=self._after_play)
             except Exception as exc:
+                self._cleanup_temp_file()
                 self._logger.warning('Failed to start FFmpeg playback: %s', exc)
                 await send_message("```Playback process could not start. Try another track.```")
                 self.is_playing = False
@@ -709,6 +802,7 @@ class music_cog(commands.Cog):
     async def dc(self, ctx):
         self.is_playing = False
         self.is_paused = False
+        self._cleanup_temp_file()
         if self.vc and self.vc.is_connected():
             await self.vc.disconnect()
     

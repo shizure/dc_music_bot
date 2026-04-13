@@ -28,6 +28,7 @@ If your bot host should use YouTube Data API v3 search fallback, also set:
 - Optional `YOUTUBE_API_LOOKUP_URLS` (default `0` to avoid URL metadata API quota use)
 - Optional `YTDLP_USE_COOKIES` (default `0`; set `1` only with valid fresh cookies)
 - Optional `YTDLP_PLAYER_CLIENTS` (default `web,mweb,android`)
+- Optional `YTDLP_PRE_DOWNLOAD` (default `1`; recommended for Railway stability)
 - Optional `FFMPEG_PREFER_COPY` (default `0`; keep `0` for stability)
 
 Slash command behavior:

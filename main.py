@@ -87,6 +87,10 @@ async def main():
         else:
             print(f"FFmpeg not found for binary: {ffmpeg_binary}")
         print(f"Music cog FFmpeg executable: {music.ffmpeg_executable}")
+        print(f"YouTube search mode: {music.youtube_search_mode}")
+        print(f"YTDLP pre-download enabled: {music.pre_download_audio}")
+        print(f"YTDLP cookies enabled: {music.use_cookie_file}")
+        print(f"YTDLP player clients: {','.join(music.player_clients)}")
         print(f"PyNaCl available: {HAS_NACL}")
         opus_ok = ensure_opus_loaded()
         print(f"Opus loaded: {opus_ok}")

@@ -18,6 +18,7 @@ Optional YouTube Data API v3 variables:
 - YOUTUBE_API_LOOKUP_URLS: set `1` to call API for direct URL title lookup, default `0`
 - YTDLP_USE_COOKIES: set `1` to use cookie file for yt-dlp requests, default `0`
 - YTDLP_PLAYER_CLIENTS: comma-separated yt-dlp clients for extraction, default `web,mweb,android`
+- YTDLP_PRE_DOWNLOAD: set `1` to download audio to temp file before playback for stability, default `1`
 - FFMPEG_PREFER_COPY: set `1` only if you explicitly want codec copy mode, default `0`
 
 How quota is protected by default:
