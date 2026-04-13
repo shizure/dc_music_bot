@@ -17,14 +17,22 @@ If your dashboard/API on Vercel still needs token-aware checks, add one of these
 - `TOKEN`
 - `DISCORD_TOKEN`
 
+If you want slash commands to appear immediately in a specific test server, set:
+- `DISCORD_GUILD_ID`
+
 If your bot host should use YouTube Data API v3 search fallback, also set:
 - `YOUTUBE_API_KEY`
 - Optional `YOUTUBE_SEARCH_MODE` (`fallback`, `api`, `ytdlp`), default `fallback`
 - Optional `YOUTUBE_API_CACHE_TTL_SECONDS` (default `21600`)
 - Optional `YOUTUBE_API_CACHE_MAX_ENTRIES` (default `256`)
 - Optional `YOUTUBE_API_LOOKUP_URLS` (default `0` to avoid URL metadata API quota use)
-- Optional `YTDLP_USE_COOKIES` (set `0` if your `YTDLP_COOKIES_B64` export is stale)
+- Optional `YTDLP_USE_COOKIES` (default `0`; set `1` only with valid fresh cookies)
+- Optional `YTDLP_PLAYER_CLIENTS` (default `web,mweb,android`)
 - Optional `FFMPEG_PREFER_COPY` (default `0`; keep `0` for stability)
+
+Slash command behavior:
+- `/play` and `/p` are registered as application commands.
+- Query autocomplete uses YouTube API and returns up to 10 suggestions.
 
 In Vercel:
 1. Open your project.

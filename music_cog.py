@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
@@ -35,8 +36,12 @@ class music_cog(commands.Cog):
         self.youtube_api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
         self.youtube_search_mode = os.getenv("YOUTUBE_SEARCH_MODE", "fallback").strip().lower()
         self.youtube_url_metadata_api = os.getenv("YOUTUBE_API_LOOKUP_URLS", "0").strip().lower() in ('1', 'true', 'yes', 'on')
-        self.use_cookie_file = os.getenv("YTDLP_USE_COOKIES", "1").strip().lower() in ('1', 'true', 'yes', 'on')
+        self.use_cookie_file = os.getenv("YTDLP_USE_COOKIES", "0").strip().lower() in ('1', 'true', 'yes', 'on')
         self.prefer_opus_copy = os.getenv("FFMPEG_PREFER_COPY", "0").strip().lower() in ('1', 'true', 'yes', 'on')
+        raw_clients = os.getenv("YTDLP_PLAYER_CLIENTS", "web,mweb,android")
+        self.player_clients = [client.strip() for client in raw_clients.split(',') if client.strip()]
+        if not self.player_clients:
+            self.player_clients = ['web', 'mweb', 'android']
         self._yt_cache_ttl_seconds = self._read_int_env("YOUTUBE_API_CACHE_TTL_SECONDS", 21600)
         self._yt_cache_max_entries = self._read_int_env("YOUTUBE_API_CACHE_MAX_ENTRIES", 256)
         self._yt_cache = {}
@@ -75,7 +80,7 @@ class music_cog(commands.Cog):
             return None
         return value
 
-    def _cache_set(self, key: str, value: dict):
+    def _cache_set(self, key: str, value):
         while len(self._yt_cache) >= self._yt_cache_max_entries:
             oldest = next(iter(self._yt_cache), None)
             if oldest is None:
@@ -173,6 +178,44 @@ class music_cog(commands.Cog):
         }
         self._cache_set(cache_key, result)
         return result
+
+    def _search_many_with_youtube_api(self, query: str, max_results: int = 10) -> list[dict]:
+        normalized = query.strip().lower()
+        if not normalized:
+            return []
+
+        max_results = max(1, min(max_results, 10))
+        cache_key = f"search:api:many:{normalized}:{max_results}"
+        cached = self._cache_get(cache_key)
+        if cached:
+            return cached
+
+        payload = self._youtube_api_get(
+            endpoint='search',
+            params={
+                'part': 'snippet',
+                'type': 'video',
+                'maxResults': max_results,
+                'q': query,
+                'videoEmbeddable': 'true',
+                'videoSyndicated': 'true',
+                'fields': 'items(id/videoId,snippet/title,snippet/liveBroadcastContent)',
+            },
+        )
+
+        results = []
+        for item in payload.get('items') or []:
+            snippet = item.get('snippet') or {}
+            if snippet.get('liveBroadcastContent') in ('live', 'upcoming'):
+                continue
+            video_id = (item.get('id') or {}).get('videoId')
+            if not video_id:
+                continue
+            title = unescape(snippet.get('title') or 'Search result')
+            results.append({'title': title, 'source': f'https://www.youtube.com/watch?v={video_id}'})
+
+        self._cache_set(cache_key, results)
+        return results
 
     def _get_video_metadata_with_api(self, video_id: str) -> dict | None:
         cache_key = f"video:api:{video_id}"
@@ -338,13 +381,9 @@ class music_cog(commands.Cog):
 
     def _extract_audio_stream_url(self, source_url: str) -> str:
         attempts = [
-            ('bestaudio/best', ['tv', 'tv_simply']),
-            ('best', ['tv', 'tv_simply']),
-            ('bestaudio/best', ['ios', 'mweb', 'web']),
-            ('best', ['ios', 'mweb', 'web']),
-            ('bestaudio/best', ['android', 'web']),
-            ('best', ['android', 'web']),
-            (None, ['tv', 'tv_simply', 'ios', 'mweb', 'web', 'android']),
+            ('bestaudio/best', self.player_clients),
+            ('best', self.player_clients),
+            (None, self.player_clients),
         ]
 
         info = None
@@ -483,7 +522,7 @@ class music_cog(commands.Cog):
             self.is_playing = False
 
     # infinite loop checking 
-    async def play_music(self, ctx):
+    async def play_music(self, send_message):
         if len(self.music_queue) > 0:
             self.is_playing = True
 
@@ -494,7 +533,7 @@ class music_cog(commands.Cog):
 
                 #in case we fail to connect
                 if self.vc == None:
-                    await ctx.send("```Could not connect to the voice channel```")
+                    await send_message("```Could not connect to the voice channel```")
                     return
             else:
                 await self.vc.move_to(self.music_queue[0][1])
@@ -505,12 +544,12 @@ class music_cog(commands.Cog):
                 song = await loop.run_in_executor(None, lambda: self._extract_audio_stream_url(m_url))
             except DownloadError as exc:
                 self._logger.warning('YouTube extraction blocked: %s', exc)
-                await ctx.send("```YouTube blocked this request (bot-check/cookies required). Try another video or use search keywords.```")
+                await send_message("```YouTube blocked this request (bot-check/cookies required). Try another video or use search keywords.```")
                 self.is_playing = False
                 return
             except Exception as exc:
                 self._logger.warning('Stream extraction failed: %s', exc)
-                await ctx.send("```Could not get a playable stream URL from YouTube. Try another track.```")
+                await send_message("```Could not get a playable stream URL from YouTube. Try another track.```")
                 self.is_playing = False
                 return
 
@@ -519,42 +558,108 @@ class music_cog(commands.Cog):
                 self.vc.play(source, after=self._after_play)
             except Exception as exc:
                 self._logger.warning('Failed to start FFmpeg playback: %s', exc)
-                await ctx.send("```Playback process could not start. Try another track.```")
+                await send_message("```Playback process could not start. Try another track.```")
                 self.is_playing = False
                 return
 
         else:
             self.is_playing = False
 
+    async def _enqueue_request(self, query: str, voice_channel, send_message):
+        loop = asyncio.get_running_loop()
+        if self.is_paused:
+            if self.vc:
+                self.vc.resume()
+            self.is_paused = False
+            self.is_playing = True
+            await send_message("```Resumed playback```")
+            return
+
+        try:
+            song = await loop.run_in_executor(None, lambda: self.search_yt(query))
+        except DownloadError as exc:
+            self._logger.warning('YouTube metadata blocked: %s', exc)
+            await send_message("```YouTube blocked metadata lookup for this URL. Try another video or use keywords instead.```")
+            return
+        except Exception as exc:
+            self._logger.warning('Search failed: %s', exc)
+            await send_message("```Could not process that query. Try another link or keywords.```")
+            return
+
+        if self.is_playing:
+            await send_message(f"**#{len(self.music_queue)+2} -'{song['title']}'** added to the queue")
+        else:
+            await send_message(f"**'{song['title']}'** added to the queue")
+        self.music_queue.append([song, voice_channel])
+        if self.is_playing == False:
+            await self.play_music(send_message)
+
+    async def _handle_slash_play(self, interaction: discord.Interaction, query: str):
+        member = interaction.user
+        voice_state = getattr(member, 'voice', None)
+        voice_channel = getattr(voice_state, 'channel', None)
+        if voice_channel is None:
+            await interaction.response.send_message("You need to join a voice channel first.", ephemeral=True)
+            return
+
+        query = query.strip()
+        if not query:
+            await interaction.response.send_message("Please provide a song name or URL.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        await self._enqueue_request(query, voice_channel, interaction.followup.send)
+
+    async def _autocomplete_choices(self, current: str):
+        query = current.strip()
+        if len(query) < 2 or not self.youtube_api_key:
+            return []
+
+        loop = asyncio.get_running_loop()
+        try:
+            suggestions = await loop.run_in_executor(None, lambda: self._search_many_with_youtube_api(query, max_results=10))
+        except Exception as exc:
+            self._logger.warning('Autocomplete lookup failed: %s', exc)
+            return []
+
+        choices = []
+        for item in suggestions[:10]:
+            label = item['title']
+            if len(label) > 100:
+                label = f"{label[:97]}..."
+            choices.append(app_commands.Choice(name=label, value=item['source']))
+        return choices
+
+    @app_commands.command(name="play", description="Play a song from YouTube")
+    @app_commands.describe(query="Song keywords or a YouTube URL")
+    async def slash_play(self, interaction: discord.Interaction, query: str):
+        await self._handle_slash_play(interaction, query)
+
+    @slash_play.autocomplete('query')
+    async def slash_play_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await self._autocomplete_choices(current)
+
+    @app_commands.command(name="p", description="Shortcut for /play")
+    @app_commands.describe(query="Song keywords or a YouTube URL")
+    async def slash_p(self, interaction: discord.Interaction, query: str):
+        await self._handle_slash_play(interaction, query)
+
+    @slash_p.autocomplete('query')
+    async def slash_p_autocomplete(self, interaction: discord.Interaction, current: str):
+        return await self._autocomplete_choices(current)
+
     @commands.command(name="play", aliases=["p","playing"], help="Plays a selected song from youtube")
     async def play(self, ctx, *args):
         query = " ".join(args)
+        if not query.strip():
+            await ctx.send("```Please provide a song name or URL```")
+            return
         try:
             voice_channel = ctx.author.voice.channel
         except Exception:
             await ctx.send("```You need to connect to a voice channel first!```")
             return
-        if self.is_paused:
-            if self.vc:
-                self.vc.resume()
-        else:
-            try:
-                song = self.search_yt(query)
-            except DownloadError as exc:
-                self._logger.warning('YouTube metadata blocked: %s', exc)
-                await ctx.send("```YouTube blocked metadata lookup for this URL. Try another video or use keywords instead.```")
-                return
-            except Exception as exc:
-                self._logger.warning('Search failed: %s', exc)
-                await ctx.send("```Could not process that query. Try another link or keywords.```")
-                return
-            if self.is_playing:
-                await ctx.send(f"**#{len(self.music_queue)+2} -'{song['title']}'** added to the queue")
-            else:
-                await ctx.send(f"**'{song['title']}'** added to the queue")
-            self.music_queue.append([song, voice_channel])
-            if self.is_playing == False:
-                await self.play_music(ctx)
+        await self._enqueue_request(query, voice_channel, ctx.send)
 
     @commands.command(name="pause", help="Pauses the current song being played")
     async def pause(self, ctx, *args):
@@ -579,7 +684,7 @@ class music_cog(commands.Cog):
         if self.vc != None and self.vc:
             self.vc.stop()
             #try to play next in the queue if it exists
-            await self.play_music(ctx)
+            await self.play_music(ctx.send)
 
 
     @commands.command(name="queue", aliases=["q"], help="Displays the current songs in queue")

@@ -7,19 +7,28 @@ This repo includes [nixpacks.toml](nixpacks.toml), so Railway installs FFmpeg au
 Required variable:
 - TOKEN
 
+Optional Discord command sync variable:
+- DISCORD_GUILD_ID: sync slash commands instantly to a specific server for faster testing
+
 Optional YouTube Data API v3 variables:
 - YOUTUBE_API_KEY: YouTube Data API v3 key
 - YOUTUBE_SEARCH_MODE: search strategy (`fallback`, `api`, `ytdlp`), default is `fallback`
 - YOUTUBE_API_CACHE_TTL_SECONDS: in-memory cache TTL in seconds, default `21600` (6 hours)
 - YOUTUBE_API_CACHE_MAX_ENTRIES: in-memory cache size, default `256`
 - YOUTUBE_API_LOOKUP_URLS: set `1` to call API for direct URL title lookup, default `0`
-- YTDLP_USE_COOKIES: set `0` to bypass cookie file usage if exported cookies are stale, default `1`
+- YTDLP_USE_COOKIES: set `1` to use cookie file for yt-dlp requests, default `0`
+- YTDLP_PLAYER_CLIENTS: comma-separated yt-dlp clients for extraction, default `web,mweb,android`
 - FFMPEG_PREFER_COPY: set `1` only if you explicitly want codec copy mode, default `0`
 
 How quota is protected by default:
 - Mode `fallback` tries `yt-dlp` search first (0 API quota), then uses API only when yt-dlp search fails.
 - Search results are cached in-memory to avoid repeated identical API calls.
 - Direct YouTube URLs do not consume API quota unless `YOUTUBE_API_LOOKUP_URLS=1`.
+
+Slash command support:
+- `/play <query>` and `/p <query>` are available.
+- As you type query text, autocomplete returns up to 10 YouTube API suggestions.
+- For immediate command visibility while testing, set `DISCORD_GUILD_ID`.
 
 Optional variables for YouTube anti-bot pages:
 - YTDLP_COOKIE_FILE: absolute path to a cookies.txt file in Netscape format

@@ -49,6 +49,22 @@ def ensure_opus_loaded() -> bool:
 async def on_ready():
     print(f"Logged in as {bot.user} (id={bot.user.id if bot.user else 'unknown'})")
     print(f"Connected to {len(bot.guilds)} guild(s)")
+    if getattr(bot, "slash_synced", False):
+        return
+
+    guild_id = os.getenv("DISCORD_GUILD_ID") or os.getenv("GUILD_ID")
+    try:
+        if guild_id:
+            guild = discord.Object(id=int(guild_id))
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(synced)} slash command(s) to guild {guild_id}")
+        else:
+            synced = await bot.tree.sync()
+            print(f"Synced {len(synced)} global slash command(s)")
+        bot.slash_synced = True
+    except Exception as exc:
+        print(f"Slash command sync failed: {exc}")
 
 
 @bot.event
