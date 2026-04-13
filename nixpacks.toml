@@ -1,5 +1,5 @@
 [phases.setup]
-nixPkgs = ["python311", "ffmpeg", "opus", "nodejs"]
+nixPkgs = ["python311"]
 
 [variables]
 NIXPACKS_PYTHON_VERSION = "3.11"
@@ -8,4 +8,4 @@ NIXPACKS_PYTHON_VERSION = "3.11"
 cmds = ["python -m pip install --upgrade pip", "python -m pip install -r requirements.txt"]
 
 [start]
-cmd = "python control_panel.py"
+cmd = "python main.py"

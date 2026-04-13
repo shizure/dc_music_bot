@@ -1,5 +1,2 @@
-discord.py[voice]
-flask
-imageio-ffmpeg
-PyNaCl>=1.5.0
-yt-dlp
+discord.py
+wavelink>=3.4.1
