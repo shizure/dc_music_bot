@@ -35,6 +35,8 @@ class music_cog(commands.Cog):
         self.youtube_api_key = os.getenv("YOUTUBE_API_KEY", "").strip()
         self.youtube_search_mode = os.getenv("YOUTUBE_SEARCH_MODE", "fallback").strip().lower()
         self.youtube_url_metadata_api = os.getenv("YOUTUBE_API_LOOKUP_URLS", "0").strip().lower() in ('1', 'true', 'yes', 'on')
+        self.use_cookie_file = os.getenv("YTDLP_USE_COOKIES", "1").strip().lower() in ('1', 'true', 'yes', 'on')
+        self.prefer_opus_copy = os.getenv("FFMPEG_PREFER_COPY", "0").strip().lower() in ('1', 'true', 'yes', 'on')
         self._yt_cache_ttl_seconds = self._read_int_env("YOUTUBE_API_CACHE_TTL_SECONDS", 21600)
         self._yt_cache_max_entries = self._read_int_env("YOUTUBE_API_CACHE_MAX_ENTRIES", 256)
         self._yt_cache = {}
@@ -238,6 +240,7 @@ class music_cog(commands.Cog):
         format_selector: str | None,
         extract_flat: bool = False,
         player_clients: list[str] | None = None,
+        use_cookies: bool = True,
     ) -> dict:
         youtube_args = {}
         if player_clients:
@@ -273,7 +276,7 @@ class music_cog(commands.Cog):
             options['extract_flat'] = 'in_playlist'
             options['skip_download'] = True
             options['quiet'] = True
-        if self._cookie_file_path:
+        if use_cookies and self.use_cookie_file and self._cookie_file_path:
             options['cookiefile'] = self._cookie_file_path
         return options
 
@@ -301,8 +304,24 @@ class music_cog(commands.Cog):
             return None
 
     def _search_with_ytdlp(self, query: str) -> dict:
-        search_ydl = YoutubeDL(self._build_ydl_options(format_selector=None, extract_flat=True))
-        info = search_ydl.extract_info(f"ytsearch1:{query}", download=False)
+        info = None
+        errors = []
+        cookie_attempts = [True, False] if self._cookie_file_path else [False]
+        if not self.use_cookie_file:
+            cookie_attempts = [False]
+
+        for use_cookies in cookie_attempts:
+            try:
+                search_ydl = YoutubeDL(self._build_ydl_options(format_selector=None, extract_flat=True, use_cookies=use_cookies))
+                info = search_ydl.extract_info(f"ytsearch1:{query}", download=False)
+                break
+            except Exception as exc:
+                errors.append(f"cookies={use_cookies}: {exc}")
+                continue
+
+        if info is None:
+            raise RuntimeError("; ".join(errors) or "No search results returned by yt-dlp")
+
         entries = info.get("entries") or []
         if not entries:
             raise RuntimeError("No search results returned by yt-dlp")
@@ -330,32 +349,70 @@ class music_cog(commands.Cog):
 
         info = None
         last_error = None
-        for fmt, clients in attempts:
-            try:
-                ydl = YoutubeDL(self._build_ydl_options(format_selector=fmt, player_clients=clients))
-                info = ydl.extract_info(source_url, download=False)
+        cookie_attempts = [True, False] if self._cookie_file_path else [False]
+        if not self.use_cookie_file:
+            cookie_attempts = [False]
+
+        for use_cookies in cookie_attempts:
+            for fmt, clients in attempts:
+                try:
+                    ydl = YoutubeDL(self._build_ydl_options(format_selector=fmt, player_clients=clients, use_cookies=use_cookies))
+                    info = ydl.extract_info(source_url, download=False)
+                    break
+                except DownloadError as exc:
+                    last_error = exc
+                    self._logger.warning(
+                        'yt-dlp extraction attempt failed (format=%s clients=%s cookies=%s): %s',
+                        fmt,
+                        clients,
+                        use_cookies,
+                        exc,
+                    )
+                    continue
+            if info is not None:
                 break
-            except DownloadError as exc:
-                last_error = exc
-                self._logger.warning('yt-dlp extraction attempt failed (format=%s clients=%s): %s', fmt, clients, exc)
-                continue
 
         if info is None:
             if last_error is not None:
                 raise last_error
             raise RuntimeError('yt-dlp failed to extract media info for this URL.')
 
+        formats = info.get('formats') or []
+        audio_only = []
+        audio_with_video = []
+        for fmt in formats:
+            if not fmt.get('url'):
+                continue
+            if fmt.get('acodec') in (None, 'none'):
+                continue
+
+            protocol = (fmt.get('protocol') or '').lower()
+            ext = (fmt.get('ext') or '').lower()
+            if protocol in ('mhtml',) or ext in ('mhtml',):
+                continue
+
+            if fmt.get('vcodec') in (None, 'none'):
+                audio_only.append(fmt)
+            else:
+                audio_with_video.append(fmt)
+
+        def _score(f: dict) -> tuple:
+            abr = f.get('abr') or 0
+            tbr = f.get('tbr') or 0
+            preference = f.get('preference') or 0
+            return (preference, abr, tbr)
+
+        if audio_only:
+            best = max(audio_only, key=_score)
+            return best['url']
+
+        if audio_with_video:
+            best = max(audio_with_video, key=_score)
+            return best['url']
+
         direct = info.get('url')
         if direct:
             return direct
-
-        formats = info.get('formats') or []
-        for fmt in reversed(formats):
-            if fmt.get('acodec') in (None, 'none'):
-                continue
-            stream_url = fmt.get('url')
-            if stream_url:
-                return stream_url
 
         raise RuntimeError('Could not find a playable audio stream URL from yt-dlp result.')
 
@@ -365,21 +422,23 @@ class music_cog(commands.Cog):
         asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
 
     def _build_audio_source(self, stream_url: str):
-        try:
-            # Prefer passthrough for YouTube Opus streams to avoid heavy transcoding crashes.
-            return discord.FFmpegOpusAudio(
-                stream_url,
-                executable=self.ffmpeg_executable,
-                codec='copy',
-                **self.FFMPEG_OPTIONS,
-            )
-        except Exception as exc:
-            self._logger.warning('FFmpegOpusAudio codec=copy failed, falling back to libopus: %s', exc)
-            return discord.FFmpegOpusAudio(
-                stream_url,
-                executable=self.ffmpeg_executable,
-                **self.FFMPEG_OPTIONS,
-            )
+        if self.prefer_opus_copy:
+            try:
+                return discord.FFmpegOpusAudio(
+                    stream_url,
+                    executable=self.ffmpeg_executable,
+                    codec='copy',
+                    **self.FFMPEG_OPTIONS,
+                )
+            except Exception as exc:
+                self._logger.warning('FFmpegOpusAudio codec=copy failed, falling back to libopus: %s', exc)
+
+        return discord.FFmpegOpusAudio(
+            stream_url,
+            executable=self.ffmpeg_executable,
+            codec='libopus',
+            **self.FFMPEG_OPTIONS,
+        )
 
     # searching the item on youtube
     def search_yt(self, item):

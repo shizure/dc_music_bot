@@ -23,6 +23,8 @@ If your bot host should use YouTube Data API v3 search fallback, also set:
 - Optional `YOUTUBE_API_CACHE_TTL_SECONDS` (default `21600`)
 - Optional `YOUTUBE_API_CACHE_MAX_ENTRIES` (default `256`)
 - Optional `YOUTUBE_API_LOOKUP_URLS` (default `0` to avoid URL metadata API quota use)
+- Optional `YTDLP_USE_COOKIES` (set `0` if your `YTDLP_COOKIES_B64` export is stale)
+- Optional `FFMPEG_PREFER_COPY` (default `0`; keep `0` for stability)
 
 In Vercel:
 1. Open your project.

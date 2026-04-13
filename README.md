@@ -13,6 +13,8 @@ Optional YouTube Data API v3 variables:
 - YOUTUBE_API_CACHE_TTL_SECONDS: in-memory cache TTL in seconds, default `21600` (6 hours)
 - YOUTUBE_API_CACHE_MAX_ENTRIES: in-memory cache size, default `256`
 - YOUTUBE_API_LOOKUP_URLS: set `1` to call API for direct URL title lookup, default `0`
+- YTDLP_USE_COOKIES: set `0` to bypass cookie file usage if exported cookies are stale, default `1`
+- FFMPEG_PREFER_COPY: set `1` only if you explicitly want codec copy mode, default `0`
 
 How quota is protected by default:
 - Mode `fallback` tries `yt-dlp` search first (0 API quota), then uses API only when yt-dlp search fails.
