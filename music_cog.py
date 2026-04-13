@@ -44,9 +44,16 @@ class music_cog(commands.Cog):
         self.player_clients = [client.strip() for client in raw_clients.split(',') if client.strip()]
         if not self.player_clients:
             self.player_clients = ['web', 'mweb', 'android']
+        self.autocomplete_enabled = os.getenv("YOUTUBE_AUTOCOMPLETE_ENABLED", "1").strip().lower() in ('1', 'true', 'yes', 'on')
+        self.autocomplete_min_chars = self._read_int_env("YOUTUBE_AUTOCOMPLETE_MIN_CHARS", 4)
+        self.autocomplete_max_results = max(1, min(self._read_int_env("YOUTUBE_AUTOCOMPLETE_MAX_RESULTS", 5), 10))
+        self.autocomplete_cooldown_seconds = self._read_int_env("YOUTUBE_AUTOCOMPLETE_COOLDOWN_SECONDS", 8)
+        self.ytdlp_rate_limit_cooldown_seconds = self._read_int_env("YTDLP_429_COOLDOWN_SECONDS", 240)
         self._yt_cache_ttl_seconds = self._read_int_env("YOUTUBE_API_CACHE_TTL_SECONDS", 21600)
         self._yt_cache_max_entries = self._read_int_env("YOUTUBE_API_CACHE_MAX_ENTRIES", 256)
         self._yt_cache = {}
+        self._last_autocomplete_fetch_at = 0.0
+        self._ytdlp_blocked_until = 0.0
 
         self._cookie_file_path = self._write_cookie_file_from_env()
         self.YDL_OPTIONS = self._build_ydl_options(format_selector='bestaudio/best')
@@ -92,6 +99,40 @@ class music_cog(commands.Cog):
                 break
             self._yt_cache.pop(oldest, None)
         self._yt_cache[key] = (time.time() + self._yt_cache_ttl_seconds, value)
+
+    def _is_rate_limited_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return 'http error 429' in text or 'too many requests' in text
+
+    def _mark_ytdlp_blocked(self):
+        self._ytdlp_blocked_until = time.time() + self.ytdlp_rate_limit_cooldown_seconds
+
+    def _ensure_ytdlp_available(self):
+        if time.time() < self._ytdlp_blocked_until:
+            remaining = int(self._ytdlp_blocked_until - time.time())
+            raise RuntimeError(f'YouTube is rate-limiting this host. Try again in about {remaining} seconds.')
+
+    def _friendly_playback_error(self, exc: Exception) -> str:
+        text = str(exc).lower()
+        if self._is_rate_limited_error(exc):
+            return 'YouTube is rate-limiting this host right now. Please try again in a few minutes.'
+        if 'requested format is not available' in text or 'only images are available' in text:
+            return 'YouTube blocked playable formats for this request on the current host. Try another track later.'
+        if 'drm protected' in text:
+            return 'This video is DRM protected and cannot be played by the bot.'
+        return 'Could not get a playable stream URL from YouTube. Try another track.'
+
+    def _get_cached_autocomplete_results(self, normalized_query: str) -> list[dict]:
+        for size in range(len(normalized_query), self.autocomplete_min_chars - 1, -1):
+            key = f"search:api:many:{normalized_query[:size]}:{self.autocomplete_max_results}"
+            cached = self._cache_get(key)
+            if not cached:
+                continue
+            filtered = [item for item in cached if normalized_query in item['title'].lower()]
+            if filtered:
+                return filtered[:self.autocomplete_max_results]
+            return cached[:self.autocomplete_max_results]
+        return []
 
     def _extract_video_id(self, value: str) -> str | None:
         try:
@@ -220,6 +261,8 @@ class music_cog(commands.Cog):
             results.append({'title': title, 'source': f'https://www.youtube.com/watch?v={video_id}'})
 
         self._cache_set(cache_key, results)
+        if results:
+            self._cache_set(f"search:api:{normalized}", results[0])
         return results
 
     def _get_video_metadata_with_api(self, video_id: str) -> dict | None:
@@ -352,6 +395,7 @@ class music_cog(commands.Cog):
             return None
 
     def _search_with_ytdlp(self, query: str) -> dict:
+        self._ensure_ytdlp_available()
         info = None
         errors = []
         cookie_attempts = [True, False] if self._cookie_file_path else [False]
@@ -364,6 +408,8 @@ class music_cog(commands.Cog):
                 info = search_ydl.extract_info(f"ytsearch1:{query}", download=False)
                 break
             except Exception as exc:
+                if self._is_rate_limited_error(exc):
+                    self._mark_ytdlp_blocked()
                 errors.append(f"cookies={use_cookies}: {exc}")
                 continue
 
@@ -385,9 +431,8 @@ class music_cog(commands.Cog):
         return {'source': url, 'title': unescape(title)}
 
     def _extract_audio_stream_url(self, source_url: str) -> str:
+        self._ensure_ytdlp_available()
         attempts = [
-            ('bestaudio/best', self.player_clients),
-            ('best', self.player_clients),
             (None, self.player_clients),
         ]
 
@@ -405,6 +450,8 @@ class music_cog(commands.Cog):
                     break
                 except DownloadError as exc:
                     last_error = exc
+                    if self._is_rate_limited_error(exc):
+                        self._mark_ytdlp_blocked()
                     self._logger.warning(
                         'yt-dlp extraction attempt failed (format=%s clients=%s cookies=%s): %s',
                         fmt,
@@ -465,6 +512,7 @@ class music_cog(commands.Cog):
         raise RuntimeError('Could not find a playable audio stream URL from yt-dlp result.')
 
     def _download_audio_file(self, source_url: str) -> str:
+        self._ensure_ytdlp_available()
         cookie_attempts = [True, False] if self._cookie_file_path else [False]
         if not self.use_cookie_file:
             cookie_attempts = [False]
@@ -509,6 +557,8 @@ class music_cog(commands.Cog):
                 raise RuntimeError('yt-dlp download completed but file path was not found')
             except Exception as exc:
                 last_error = exc
+                if self._is_rate_limited_error(exc):
+                    self._mark_ytdlp_blocked()
                 self._logger.warning('yt-dlp pre-download failed (cookies=%s): %s', use_cookies, exc)
 
         if last_error:
@@ -634,12 +684,12 @@ class music_cog(commands.Cog):
                 resolved = await loop.run_in_executor(None, lambda: self._resolve_playback_input(m_url))
             except DownloadError as exc:
                 self._logger.warning('YouTube extraction blocked: %s', exc)
-                await send_message("```YouTube blocked this request (bot-check/cookies required). Try another video or use search keywords.```")
+                await send_message(f"```{self._friendly_playback_error(exc)}```")
                 self.is_playing = False
                 return
             except Exception as exc:
                 self._logger.warning('Stream extraction failed: %s', exc)
-                await send_message("```Could not get a playable stream URL from YouTube. Try another track.```")
+                await send_message(f"```{self._friendly_playback_error(exc)}```")
                 self.is_playing = False
                 return
 
@@ -705,18 +755,28 @@ class music_cog(commands.Cog):
 
     async def _autocomplete_choices(self, current: str):
         query = current.strip()
-        if len(query) < 2 or not self.youtube_api_key:
+        if not self.autocomplete_enabled or len(query) < self.autocomplete_min_chars or not self.youtube_api_key:
             return []
 
-        loop = asyncio.get_running_loop()
-        try:
-            suggestions = await loop.run_in_executor(None, lambda: self._search_many_with_youtube_api(query, max_results=10))
-        except Exception as exc:
-            self._logger.warning('Autocomplete lookup failed: %s', exc)
+        normalized = query.lower()
+        cached = self._get_cached_autocomplete_results(normalized)
+        now = time.time()
+        if cached and (now - self._last_autocomplete_fetch_at) < self.autocomplete_cooldown_seconds:
+            suggestions = cached
+        else:
+            loop = asyncio.get_running_loop()
+            try:
+                suggestions = await loop.run_in_executor(None, lambda: self._search_many_with_youtube_api(query, max_results=self.autocomplete_max_results))
+                self._last_autocomplete_fetch_at = now
+            except Exception as exc:
+                self._logger.warning('Autocomplete lookup failed: %s', exc)
+                suggestions = cached
+
+        if not suggestions:
             return []
 
         choices = []
-        for item in suggestions[:10]:
+        for item in suggestions[:self.autocomplete_max_results]:
             label = item['title']
             if len(label) > 100:
                 label = f"{label[:97]}..."

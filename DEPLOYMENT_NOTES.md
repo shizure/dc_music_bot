@@ -26,9 +26,14 @@ If your bot host should use YouTube Data API v3 search fallback, also set:
 - Optional `YOUTUBE_API_CACHE_TTL_SECONDS` (default `21600`)
 - Optional `YOUTUBE_API_CACHE_MAX_ENTRIES` (default `256`)
 - Optional `YOUTUBE_API_LOOKUP_URLS` (default `0` to avoid URL metadata API quota use)
+- Optional `YOUTUBE_AUTOCOMPLETE_ENABLED` (default `1`)
+- Optional `YOUTUBE_AUTOCOMPLETE_MIN_CHARS` (default `4`)
+- Optional `YOUTUBE_AUTOCOMPLETE_MAX_RESULTS` (default `5`)
+- Optional `YOUTUBE_AUTOCOMPLETE_COOLDOWN_SECONDS` (default `8`)
 - Optional `YTDLP_USE_COOKIES` (default `0`; set `1` only with valid fresh cookies)
 - Optional `YTDLP_PLAYER_CLIENTS` (default `web,mweb,android`)
 - Optional `YTDLP_PRE_DOWNLOAD` (default `1`; recommended for Railway stability)
+- Optional `YTDLP_429_COOLDOWN_SECONDS` (default `240`)
 - Optional `FFMPEG_PREFER_COPY` (default `0`; keep `0` for stability)
 
 Slash command behavior:
