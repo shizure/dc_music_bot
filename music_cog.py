@@ -72,6 +72,7 @@ class music_cog(commands.Cog):
             self.ffmpeg_executable = imageio_ffmpeg.get_ffmpeg_exe()
 
         self.vc = None
+        self.status_channel = None
         self._current_temp_file = None
         self._temp_audio_dir = Path('/tmp/dc_music_bot_audio')
         self._temp_audio_dir.mkdir(parents=True, exist_ok=True)
@@ -526,7 +527,7 @@ class music_cog(commands.Cog):
             try:
                 output_template = self._temp_audio_dir / f"%(id)s-{uuid.uuid4().hex}.%(ext)s"
                 options = self._build_ydl_options(
-                    format_selector='bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio/best',
+                    format_selector='bestaudio[acodec=opus]/bestaudio[ext=webm]/bestaudio[ext=m4a]/bestaudio',
                     player_clients=self.player_clients,
                     use_cookies=use_cookies,
                 )
@@ -593,15 +594,25 @@ class music_cog(commands.Cog):
     def _after_play(self, error):
         if error is not None:
             self._logger.warning('Playback error: %s', error)
+            asyncio.run_coroutine_threadsafe(
+                self._notify_status_channel("Playback failed while streaming audio. Try another track."),
+                self.bot.loop,
+            )
         self._cleanup_temp_file()
         asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
+
+    async def _notify_status_channel(self, message: str):
+        if self.status_channel is None:
+            return
+        try:
+            await self.status_channel.send(f"```{message}```")
+        except Exception as exc:
+            self._logger.warning('Failed to send status message: %s', exc)
 
     def _build_audio_source(self, playback_input: str):
         is_remote = playback_input.startswith(('http://', 'https://'))
         ffmpeg_options = self.FFMPEG_OPTIONS_STREAM if is_remote else self.FFMPEG_OPTIONS_LOCAL
-        local_ext = Path(playback_input).suffix.lower()
-        should_copy = self.prefer_opus_copy or local_ext in ('.opus', '.ogg', '.webm')
-        if should_copy:
+        if self.prefer_opus_copy:
             try:
                 return discord.FFmpegOpusAudio(
                     playback_input,
@@ -714,8 +725,9 @@ class music_cog(commands.Cog):
         else:
             self.is_playing = False
 
-    async def _enqueue_request(self, query: str, voice_channel, send_message):
+    async def _enqueue_request(self, query: str, voice_channel, send_message, status_channel=None):
         loop = asyncio.get_running_loop()
+        self.status_channel = status_channel
         if self.is_paused:
             if self.vc:
                 self.vc.resume()
@@ -757,7 +769,7 @@ class music_cog(commands.Cog):
             return
 
         await interaction.response.defer()
-        await self._enqueue_request(query, voice_channel, interaction.followup.send)
+        await self._enqueue_request(query, voice_channel, interaction.followup.send, interaction.channel)
 
     async def _autocomplete_choices(self, current: str):
         query = current.strip()
@@ -818,7 +830,7 @@ class music_cog(commands.Cog):
         except Exception:
             await ctx.send("```You need to connect to a voice channel first!```")
             return
-        await self._enqueue_request(query, voice_channel, ctx.send)
+        await self._enqueue_request(query, voice_channel, ctx.send, ctx.channel)
 
     @commands.command(name="pause", help="Pauses the current song being played")
     async def pause(self, ctx, *args):
