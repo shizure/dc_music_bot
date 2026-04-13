@@ -109,6 +109,15 @@ class music_cog(commands.Cog):
         text = str(exc).lower()
         return 'http error 429' in text or 'too many requests' in text
 
+    def _is_auth_required_error(self, exc: Exception) -> bool:
+        text = str(exc).lower()
+        return (
+            "sign in to confirm you're not a bot" in text
+            or "sign in to confirm you’re not a bot" in text
+            or '--cookies-from-browser or --cookies' in text
+            or 'authentication is required' in text
+        )
+
     def _mark_ytdlp_blocked(self):
         self._ytdlp_blocked_until = time.time() + self.ytdlp_rate_limit_cooldown_seconds
 
@@ -119,6 +128,11 @@ class music_cog(commands.Cog):
 
     def _friendly_playback_error(self, exc: Exception) -> str:
         text = str(exc).lower()
+        if self._is_auth_required_error(exc):
+            return (
+                'YouTube requested sign-in verification for this host. '
+                'Add fresh YTDLP_COOKIES_B64 and set YTDLP_USE_COOKIES=1, then redeploy.'
+            )
         if self._is_rate_limited_error(exc):
             return 'YouTube is rate-limiting this host right now. Please try again in a few minutes.'
         if 'requested format is not available' in text or 'only images are available' in text:
@@ -455,7 +469,7 @@ class music_cog(commands.Cog):
                     break
                 except DownloadError as exc:
                     last_error = exc
-                    if self._is_rate_limited_error(exc):
+                    if self._is_rate_limited_error(exc) or self._is_auth_required_error(exc):
                         self._mark_ytdlp_blocked()
                     self._logger.warning(
                         'yt-dlp extraction attempt failed (format=%s clients=%s cookies=%s): %s',
@@ -562,7 +576,7 @@ class music_cog(commands.Cog):
                 raise RuntimeError('yt-dlp download completed but file path was not found')
             except Exception as exc:
                 last_error = exc
-                if self._is_rate_limited_error(exc):
+                if self._is_rate_limited_error(exc) or self._is_auth_required_error(exc):
                     self._mark_ytdlp_blocked()
                 self._logger.warning('yt-dlp pre-download failed (cookies=%s): %s', use_cookies, exc)
 
@@ -576,6 +590,8 @@ class music_cog(commands.Cog):
                 local_path = self._download_audio_file(source_url)
                 return {'input': local_path, 'temp_file': local_path}
             except Exception as exc:
+                if self._is_auth_required_error(exc):
+                    raise exc
                 self._logger.warning('Pre-download failed, falling back to stream URL: %s', exc)
 
         stream_url = self._extract_audio_stream_url(source_url)
