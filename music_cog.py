@@ -57,8 +57,12 @@ class music_cog(commands.Cog):
 
         self._cookie_file_path = self._write_cookie_file_from_env()
         self.YDL_OPTIONS = self._build_ydl_options(format_selector='bestaudio/best')
-        self.FFMPEG_OPTIONS = {
+        self.FFMPEG_OPTIONS_STREAM = {
             'before_options': '-nostdin -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+            'options': '-vn -loglevel warning',
+        }
+        self.FFMPEG_OPTIONS_LOCAL = {
+            'before_options': '-nostdin',
             'options': '-vn -loglevel warning',
         }
         requested_binary = os.getenv("FFMPEG_PATH", "ffmpeg")
@@ -593,6 +597,8 @@ class music_cog(commands.Cog):
         asyncio.run_coroutine_threadsafe(self.play_next(), self.bot.loop)
 
     def _build_audio_source(self, playback_input: str):
+        is_remote = playback_input.startswith(('http://', 'https://'))
+        ffmpeg_options = self.FFMPEG_OPTIONS_STREAM if is_remote else self.FFMPEG_OPTIONS_LOCAL
         local_ext = Path(playback_input).suffix.lower()
         should_copy = self.prefer_opus_copy or local_ext in ('.opus', '.ogg', '.webm')
         if should_copy:
@@ -601,7 +607,7 @@ class music_cog(commands.Cog):
                     playback_input,
                     executable=self.ffmpeg_executable,
                     codec='copy',
-                    **self.FFMPEG_OPTIONS,
+                    **ffmpeg_options,
                 )
             except Exception as exc:
                 self._logger.warning('FFmpegOpusAudio codec=copy failed, falling back to libopus: %s', exc)
@@ -610,7 +616,7 @@ class music_cog(commands.Cog):
             playback_input,
             executable=self.ffmpeg_executable,
             codec='libopus',
-            **self.FFMPEG_OPTIONS,
+            **ffmpeg_options,
         )
 
     # searching the item on youtube
