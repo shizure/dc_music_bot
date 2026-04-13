@@ -23,7 +23,7 @@ Required:
 Optional:
 - `DISCORD_GUILD_ID` for instant slash command sync in one server
 - `BOT_PREFIX` (default `?`)
-- `LAVALINK_SEARCH_PREFIX` (default `ytsearch`)
+- `LAVALINK_SEARCH_PREFIX` (default `ytmsearch`)
 
 ## Railway Setup (Simple)
 
@@ -45,6 +45,8 @@ The plugin should:
 - configure clients (example: `MUSIC`, `ANDROID_VR`, `WEB`, `WEBEMBEDDED`)
 
 If Lavalink is running but YouTube queries return no tracks, the issue is usually Lavalink plugin/source config, not your Python bot.
+
+If playback fails with `All clients failed to load the item`, redeploy Lavalink so updated `plugins.youtube.clients` order is applied.
 
 ## Kept Project Files
 

@@ -26,6 +26,7 @@ class QueueItem:
 class GuildState:
     queue: deque[QueueItem] = field(default_factory=deque)
     current: QueueItem | None = None
+    status_channel_id: int | None = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
@@ -38,7 +39,7 @@ class music_cog(commands.Cog):
 
         self.lavalink_uri = os.getenv("LAVALINK_URI", "http://localhost:2333")
         self.lavalink_password = os.getenv("LAVALINK_PASSWORD", "youshallnotpass")
-        self.lavalink_search_prefix = os.getenv("LAVALINK_SEARCH_PREFIX", "ytsearch")
+        self.lavalink_search_prefix = os.getenv("LAVALINK_SEARCH_PREFIX", "ytmsearch")
 
     def _state(self, guild_id: int) -> GuildState:
         if guild_id not in self._states:
@@ -102,18 +103,58 @@ class music_cog(commands.Cog):
         if not value:
             raise RuntimeError("Please provide a song name or a URL.")
 
-        search_value = value if URL_RE.match(value) else f"{self.lavalink_search_prefix}:{value}"
-        results = await wavelink.Playable.search(search_value)
-        if not results:
-            raise RuntimeError("No results found for that query.")
+        search_attempts: list[str]
+        if URL_RE.match(value):
+            search_attempts = [value]
+        else:
+            raw_prefixes = [self.lavalink_search_prefix, "ytmsearch", "ytsearch"]
+            prefixes: list[str] = []
+            for prefix in raw_prefixes:
+                cleaned = prefix.strip().lower()
+                if not cleaned or cleaned in prefixes:
+                    continue
+                prefixes.append(cleaned)
+            search_attempts = [f"{prefix}:{value}" for prefix in prefixes]
 
-        tracks = list(getattr(results, "tracks", results))
-        if not tracks:
-            raise RuntimeError("No tracks were returned by Lavalink.")
+        last_error: Exception | None = None
+        for search_value in search_attempts:
+            try:
+                results = await wavelink.Playable.search(search_value)
+            except Exception as exc:
+                last_error = exc
+                continue
 
-        track = tracks[0]
-        title = getattr(track, "title", None) or getattr(track, "identifier", "Unknown track")
-        return QueueItem(track=track, title=str(title))
+            if not results:
+                continue
+
+            tracks = list(getattr(results, "tracks", results))
+            if not tracks:
+                continue
+
+            track = tracks[0]
+            title = getattr(track, "title", None) or getattr(track, "identifier", "Unknown track")
+            return QueueItem(track=track, title=str(title))
+
+        if last_error is not None:
+            raise RuntimeError(f"Search failed in Lavalink: {last_error}") from last_error
+        raise RuntimeError("No results found for that query.")
+
+    async def _send_status(self, guild_id: int, message: str) -> None:
+        state = self._states.get(guild_id)
+        if state is None or state.status_channel_id is None:
+            return
+
+        channel = self.bot.get_channel(state.status_channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(state.status_channel_id)
+            except Exception:
+                return
+
+        try:
+            await channel.send(f"```{message}```")
+        except Exception:
+            return
 
     async def _play_next(self, guild_id: int, player: wavelink.Player) -> None:
         state = self._state(guild_id)
@@ -133,15 +174,17 @@ class music_cog(commands.Cog):
             self._logger.warning("Failed to start track '%s': %s", item.title, exc)
             async with state.lock:
                 state.current = None
+            await self._send_status(guild_id, f"Track failed to start: {item.title}")
             await self._play_next(guild_id, player)
 
-    async def _enqueue(self, member: discord.Member, query: str) -> str:
+    async def _enqueue(self, member: discord.Member, query: str, status_channel_id: int | None = None) -> str:
         await self._ensure_node()
         player = await self._get_player(member)
         item = await self._search_track(query)
         state = self._state(member.guild.id)
 
         async with state.lock:
+            state.status_channel_id = status_channel_id
             state.queue.append(item)
             queue_position = len(state.queue) + (1 if state.current else 0)
 
@@ -178,10 +221,15 @@ class music_cog(commands.Cog):
         if player is None or player.guild is None:
             return
 
+        self._logger.warning("Track exception on guild %s: %s", player.guild.id, payload.exception)
         state = self._state(player.guild.id)
         async with state.lock:
             state.current = None
 
+        await self._send_status(
+            player.guild.id,
+            "Playback failed on this track due to YouTube source restrictions. Skipping to next item.",
+        )
         await self._play_next(player.guild.id, player)
 
     @app_commands.command(name="play", description="Play a song from YouTube")
@@ -194,7 +242,8 @@ class music_cog(commands.Cog):
 
         await interaction.response.defer()
         try:
-            message = await self._enqueue(member, query)
+            channel_id = interaction.channel.id if interaction.channel else None
+            message = await self._enqueue(member, query, status_channel_id=channel_id)
             await interaction.followup.send(f"```{message}```")
         except Exception as exc:
             await interaction.followup.send(f"```{exc}```")
@@ -216,7 +265,7 @@ class music_cog(commands.Cog):
             return
 
         try:
-            message = await self._enqueue(ctx.author, query)
+            message = await self._enqueue(ctx.author, query, status_channel_id=ctx.channel.id)
             await ctx.send(f"```{message}```")
         except Exception as exc:
             await ctx.send(f"```{exc}```")
